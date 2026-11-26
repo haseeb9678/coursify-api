@@ -39,6 +39,7 @@ import { DatabaseModule } from './database/database.module.js';
 import { HealthModule } from './modules/health/health.module.js';
 import { UsersModule } from './modules/users/users.module.js';
 import { AuthModule } from './modules/auth/auth.module.js';
+import { AdminUsersModule } from './modules/admin/users/admin-users.module.js';
 
 @Module({
   imports: [
@@ -109,6 +110,7 @@ import { AuthModule } from './modules/auth/auth.module.js';
     HealthModule,
     UsersModule,
     AuthModule,
+    AdminUsersModule,
   ],
 
   controllers: [

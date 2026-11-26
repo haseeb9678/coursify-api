@@ -14,11 +14,12 @@ import { CookieService } from './services/cookie.service.js';
 
 import { JwtStrategy } from './strategies/jwt.strategy.js';
 
-import { GqlAuthGuard } from '../../common/guards/gql-auth.guard.js';
+import { AuthorizationModule } from '../../common/authorization.module.js';
 
 @Module({
   imports: [
     UsersModule,
+    AuthorizationModule,
 
     JwtModule.register({}),
 
@@ -36,12 +37,11 @@ import { GqlAuthGuard } from '../../common/guards/gql-auth.guard.js';
     CookieService,
 
     JwtStrategy,
-    GqlAuthGuard,
   ],
 
   exports: [
     AuthService,
-    GqlAuthGuard,
+    SessionService,
   ],
 })
 export class AuthModule { }

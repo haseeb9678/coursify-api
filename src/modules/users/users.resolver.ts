@@ -1,10 +1,17 @@
 import { Args, ID, Mutation, Query, Resolver } from "@nestjs/graphql";
+import { UseGuards } from "@nestjs/common";
+
+import { GqlAuthGuard } from "../../common/guards/gql-auth.guard.js";
+import { RolesGuard } from "../../common/guards/roles.guard.js";
+import { Roles } from "../../common/decorators/roles.decorator.js";
+import { UserRole } from "../../generated/prisma/enums.js";
+
 import { User } from "./entities/user.entity.js";
 import { UsersService } from "./users.service.js";
 import { NotFoundException, ParseUUIDPipe } from "@nestjs/common";
 import { CreateUserInput } from "./dto/create-user.input.js";
 import { hashPassword } from "../../common/utils/password.util.js";
-import { createMutationResponse, MutationResponse } from "../../common/responses/mutation.response.js";
+import { createMutationResponse } from "../../common/responses/mutation.response.js";
 import { CreateUserResponse } from "./responses/create-user.response.js";
 
 
@@ -34,6 +41,8 @@ export class UsersResolver {
         name: "users",
         description: "Retrieve all users"
     })
+    @UseGuards(GqlAuthGuard, RolesGuard)
+    @Roles(UserRole.ADMIN)
     async getAllUsers() {
         return this.usersService.getAllUsers()
     }
@@ -43,6 +52,8 @@ export class UsersResolver {
         name: 'userByEmail',
         description: 'Retrieve a user by email',
     })
+    @UseGuards(GqlAuthGuard, RolesGuard)
+    @Roles(UserRole.ADMIN)
     async getUserByEmail(
         @Args("email", { type: () => String }) email: string
     ) {
@@ -58,6 +69,8 @@ export class UsersResolver {
         name: 'userById',
         description: 'Retrieve a user by ID',
     })
+    @UseGuards(GqlAuthGuard, RolesGuard)
+    @Roles(UserRole.ADMIN)
     async getUserById(
         @Args('id', { type: () => ID }, ParseUUIDPipe) id: string,
     ): Promise<User> {

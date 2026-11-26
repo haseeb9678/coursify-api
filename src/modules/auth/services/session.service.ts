@@ -3,6 +3,7 @@ import {
     UnauthorizedException,
 } from '@nestjs/common';
 
+import type { Prisma } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../../database/prisma.service.js';
 
 import type {
@@ -117,12 +118,68 @@ export class SessionService {
         return result.count > 0;
     }
 
+    // Find active sessions of a user
+    async findActiveSessions(
+        userId: string,
+        take: number,
+        skip = 0,
+    ) {
+        return this.prisma.refreshSession.findMany({
+            where: {
+                userId,
+                revokedAt: null,
+                expiresAt: {
+                    gt: new Date(),
+                },
+            },
+            orderBy: {
+                createdAt: 'desc',
+            },
+            skip,
+            take,
+            select: {
+                id: true,
+                userId: true,
+                userAgent: true,
+                ipAddress: true,
+                createdAt: true,
+                updatedAt: true,
+                expiresAt: true,
+                revokedAt: true,
+            },
+        });
+    }
+
     // Revoke all sessions of a user
-    async revokeAllSessions(userId: string) {
+    async revokeAllSessions(
+        userId: string,
+        transaction?: Prisma.TransactionClient,
+    ) {
+        const client = transaction ?? this.prisma;
+
+        return client.refreshSession.updateMany({
+            where: {
+                userId,
+                revokedAt: null,
+            },
+            data: {
+                revokedAt: new Date(),
+            },
+        });
+    }
+
+    async revokeUserSessions(
+        userId: string,
+        sessionId?: string,
+    ) {
         return this.prisma.refreshSession.updateMany({
             where: {
                 userId,
                 revokedAt: null,
+                expiresAt: {
+                    gt: new Date(),
+                },
+                ...(sessionId !== undefined ? { id: sessionId } : {}),
             },
             data: {
                 revokedAt: new Date(),
