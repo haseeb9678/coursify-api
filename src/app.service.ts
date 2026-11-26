@@ -1,8 +1,10 @@
 import { Injectable } from '@nestjs/common';
 
+import { getWelcomeTemplate } from './common/templates/welcome.template.js';
+
 @Injectable()
 export class AppService {
-  getHello(): string {
-    return 'Hello World!';
+  getWelcomePage(): string {
+    return getWelcomeTemplate();
   }
 }
