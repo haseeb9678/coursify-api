@@ -39,7 +39,16 @@ model User {
   updatedAt DateTime @updatedAt
 
   // Relationships
-  refreshSessions RefreshSession[]
+  refreshSessions   RefreshSession[]
+  taughtCourses     Course[]            @relation("CourseInstructor")
+  createdCourses    Course[]            @relation("CourseCreator")
+  courseReviews     CourseReview[]      @relation("CourseReviewer")
+
+  heroSlidesCreated  HeroSlide[] @relation("HeroSlideCreator")
+  heroSlidesUpdated  HeroSlide[] @relation("HeroSlideUpdater")
+  heroSettingsEdited HeroSettings[] @relation("HeroSettingsUpdater")
+  popupsCreated      PromotionalPopup[] @relation("PopupCreator")
+  popupsUpdated      PromotionalPopup[] @relation("PopupUpdater")
 
   @@map("users")
 }
@@ -64,4 +73,327 @@ model RefreshSession {
   @@index([userId])
   @@index([expiresAt])
   @@map("refresh_sessions")
+}
+
+enum CategoryStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum CourseStatus {
+  DRAFT
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  PUBLISHED
+  ARCHIVED
+}
+
+enum CourseLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum CoursePricingType {
+  FREE
+  PAID
+}
+
+enum LessonType {
+  VIDEO
+  TEXT
+  PDF
+}
+
+enum LessonResourceType {
+  PDF
+  DOCUMENT
+  LINK
+  FILE
+}
+
+enum CourseReviewDecision {
+  APPROVED
+  REJECTED
+  CHANGES_REQUESTED
+}
+
+model Category {
+  id             String         @id @default(uuid()) @db.Uuid
+  name           String         @db.VarChar(100)
+  slug           String         @unique @db.VarChar(120)
+  description    String         @db.VarChar(1000)
+  iconName       String         @db.VarChar(50)
+  iconColor      String         @db.VarChar(20)
+  iconBackground String         @db.VarChar(20)
+  imageUrl       String?
+  status         CategoryStatus @default(ACTIVE)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  courses Course[]
+
+  @@index([status])
+  @@index([name])
+  @@map("categories")
+}
+
+model Course {
+  id                   String           @id @default(uuid()) @db.Uuid
+  title                String           @db.VarChar(180)
+  slug                 String           @unique @db.VarChar(200)
+  shortDescription     String           @default("") @db.VarChar(500)
+  description          String           @default("") @db.VarChar(10000)
+  thumbnailUrl         String?
+  promotionalVideoUrl  String?
+  categoryId           String           @db.Uuid
+  instructorId         String           @db.Uuid
+  createdById          String           @db.Uuid
+  level                CourseLevel      @default(BEGINNER)
+  language             String           @default("English") @db.VarChar(100)
+  pricingType          CoursePricingType @default(FREE)
+  priceMinorUnits      Int              @default(0)
+  discountedPriceMinorUnits Int?
+  currency             String           @default("USD") @db.VarChar(3)
+  learningOutcomes     String[]         @default([])
+  requirements         String[]         @default([])
+  targetAudience       String[]         @default([])
+  status               CourseStatus     @default(DRAFT)
+  isFeatured           Boolean          @default(false)
+  submittedAt          DateTime?
+  approvedAt           DateTime?
+  publishedAt          DateTime?
+  archivedAt           DateTime?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+
+  category    Category       @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  instructor  User           @relation("CourseInstructor", fields: [instructorId], references: [id], onDelete: Restrict)
+  createdBy   User           @relation("CourseCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  sections    CourseSection[]
+  reviews     CourseReview[]
+
+  @@index([categoryId])
+  @@index([instructorId])
+  @@index([createdById])
+  @@index([status])
+  @@index([level])
+  @@index([language])
+  @@index([pricingType])
+  @@index([isFeatured])
+  @@index([publishedAt])
+  @@map("courses")
+}
+
+model CourseSection {
+  id          String   @id @default(uuid()) @db.Uuid
+  courseId    String   @db.Uuid
+  title       String   @db.VarChar(180)
+  description String   @default("") @db.VarChar(2000)
+  position    Int
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  course  Course         @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  lessons CourseLesson[]
+
+  @@unique([courseId, position])
+  @@index([courseId])
+  @@map("course_sections")
+}
+
+model CourseLesson {
+  id              String    @id @default(uuid()) @db.Uuid
+  sectionId       String    @db.Uuid
+  title           String    @db.VarChar(180)
+  description     String    @default("") @db.VarChar(2000)
+  type            LessonType
+  content         String    @default("") @db.Text
+  videoUrl        String?
+  documentUrl     String?
+  durationSeconds Int?
+  position        Int
+  isPreview       Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  section   CourseSection  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  resources LessonResource[]
+
+  @@unique([sectionId, position])
+  @@index([sectionId])
+  @@map("course_lessons")
+}
+
+model LessonResource {
+  id        String              @id @default(uuid()) @db.Uuid
+  lessonId  String              @db.Uuid
+  title     String              @db.VarChar(180)
+  type      LessonResourceType
+  url       String
+  fileName  String?             @db.VarChar(255)
+  fileSize  Int?
+  position  Int
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+
+  lesson CourseLesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  @@unique([lessonId, position])
+  @@index([lessonId])
+  @@map("lesson_resources")
+}
+
+model CourseReview {
+  id             String               @id @default(uuid()) @db.Uuid
+  courseId       String               @db.Uuid
+  reviewerId     String               @db.Uuid
+  decision       CourseReviewDecision
+  feedback       String               @db.VarChar(5000)
+  previousStatus CourseStatus
+  newStatus      CourseStatus
+  createdAt      DateTime             @default(now())
+
+  course   Course @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  reviewer User   @relation("CourseReviewer", fields: [reviewerId], references: [id], onDelete: Restrict)
+
+  @@index([courseId])
+  @@index([reviewerId])
+  @@index([createdAt])
+  @@map("course_reviews")
+}
+
+enum WebsiteContentStatus {
+  DRAFT
+  ACTIVE
+  INACTIVE
+}
+
+enum HeroImagePosition {
+  CENTER
+  CENTER_UP
+  LEFT
+  RIGHT
+  TOP
+  BOTTOM
+}
+
+enum PopupLayout {
+  CENTERED
+  IMAGE_LEFT
+  IMAGE_TOP
+  TEXT_ONLY
+}
+
+enum PopupTrigger {
+  ON_PAGE_LOAD
+  AFTER_DELAY
+}
+
+enum PopupFrequency {
+  ONCE_PER_SESSION
+  ONCE_PER_VISITOR
+  ONCE_PER_DAY
+  EVERY_VISIT
+  CUSTOM_INTERVAL
+}
+
+enum PopupAudience {
+  ALL_VISITORS
+  GUESTS_ONLY
+  AUTHENTICATED_USERS
+}
+
+enum PopupPageTarget {
+  HOMEPAGE_ONLY
+  ALL_PUBLIC_PAGES
+  COURSE_CATALOG
+  SPECIFIC_PATHS
+}
+
+model HeroSlide {
+  id                String @id @default(uuid()) @db.Uuid
+  internalName      String @db.VarChar(100)
+  eyebrow           String @default("") @db.VarChar(60)
+  title             String @default("") @db.VarChar(110)
+  description       String @default("") @db.VarChar(260)
+  imageUrl          String?
+  mobileImageUrl    String?
+  imageAlt          String @default("") @db.VarChar(160)
+  imagePosition     HeroImagePosition @default(CENTER)
+  primaryCtaLabel   String @default("") @db.VarChar(40)
+  primaryCtaHref    String?
+  secondaryCtaLabel String @default("") @db.VarChar(40)
+  secondaryCtaHref  String?
+  position          Int
+  status            WebsiteContentStatus @default(DRAFT)
+  startsAt          DateTime?
+  endsAt            DateTime?
+  createdById       String? @db.Uuid
+  updatedById       String? @db.Uuid
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  createdBy User? @relation("HeroSlideCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy User? @relation("HeroSlideUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@index([position, id])
+  @@index([status, startsAt, endsAt])
+  @@map("website_hero_slides")
+}
+
+model HeroSettings {
+  id                   Int @id @default(1)
+  isEnabled            Boolean @default(true)
+  autoplayEnabled      Boolean @default(true)
+  autoplayDelayMs      Int @default(6000)
+  loopEnabled          Boolean @default(true)
+  showNavigationArrows Boolean @default(true)
+  showPaginationDots   Boolean @default(true)
+  pauseOnHover         Boolean @default(true)
+  pauseOnFocus         Boolean @default(true)
+  updatedById          String? @db.Uuid
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  updatedBy User? @relation("HeroSettingsUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@map("website_hero_settings")
+}
+
+model PromotionalPopup {
+  id                String @id @default(uuid()) @db.Uuid
+  internalName      String @db.VarChar(100)
+  title             String @default("") @db.VarChar(110)
+  description       String @default("") @db.VarChar(500)
+  imageUrl          String?
+  imageAlt          String @default("") @db.VarChar(160)
+  layout            PopupLayout @default(CENTERED)
+  primaryCtaLabel   String @default("") @db.VarChar(40)
+  primaryCtaHref    String?
+  secondaryCtaLabel String @default("") @db.VarChar(40)
+  secondaryCtaHref  String?
+  status            WebsiteContentStatus @default(DRAFT)
+  priority          Int @default(0)
+  triggerType       PopupTrigger @default(ON_PAGE_LOAD)
+  delaySeconds      Int @default(5)
+  displayFrequency  PopupFrequency @default(ONCE_PER_SESSION)
+  repeatAfterHours  Int?
+  audience          PopupAudience @default(ALL_VISITORS)
+  pageTarget        PopupPageTarget @default(HOMEPAGE_ONLY)
+  targetPaths       String[] @default([])
+  startsAt          DateTime?
+  endsAt            DateTime?
+  createdById       String? @db.Uuid
+  updatedById       String? @db.Uuid
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  createdBy User? @relation("PopupCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy User? @relation("PopupUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@index([status, startsAt, endsAt])
+  @@index([priority, createdAt, id])
+  @@map("website_promotional_popups")
 }

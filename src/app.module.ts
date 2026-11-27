@@ -40,6 +40,11 @@ import { HealthModule } from './modules/health/health.module.js';
 import { UsersModule } from './modules/users/users.module.js';
 import { AuthModule } from './modules/auth/auth.module.js';
 import { AdminUsersModule } from './modules/admin/users/admin-users.module.js';
+import { CategoriesModule } from './modules/categories/categories.module.js';
+import { CoursesModule } from './modules/courses/courses.module.js';
+import { CurriculumModule } from './modules/curriculum/curriculum.module.js';
+import { WebsiteModule } from './modules/website/website.module.js';
+import { CourseReviewsModule } from './modules/course-reviews/course-reviews.module.js';
 
 @Module({
   imports: [
@@ -111,6 +116,11 @@ import { AdminUsersModule } from './modules/admin/users/admin-users.module.js';
     UsersModule,
     AuthModule,
     AdminUsersModule,
+    CategoriesModule,
+    CoursesModule,
+    CurriculumModule,
+    CourseReviewsModule,
+    WebsiteModule,
   ],
 
   controllers: [
