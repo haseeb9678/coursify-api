@@ -43,6 +43,7 @@ import { AdminUsersModule } from './modules/admin/users/admin-users.module.js';
 import { CategoriesModule } from './modules/categories/categories.module.js';
 import { CoursesModule } from './modules/courses/courses.module.js';
 import { CurriculumModule } from './modules/curriculum/curriculum.module.js';
+import { CommerceModule } from './modules/commerce/commerce.module.js';
 import { WebsiteModule } from './modules/website/website.module.js';
 import { CourseReviewsModule } from './modules/course-reviews/course-reviews.module.js';
 
@@ -121,6 +122,7 @@ import { CourseReviewsModule } from './modules/course-reviews/course-reviews.mod
     CurriculumModule,
     CourseReviewsModule,
     WebsiteModule,
+    CommerceModule,
   ],
 
   controllers: [

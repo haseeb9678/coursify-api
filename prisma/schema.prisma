@@ -50,6 +50,11 @@ model User {
   popupsCreated      PromotionalPopup[] @relation("PopupCreator")
   popupsUpdated      PromotionalPopup[] @relation("PopupUpdater")
 
+  enrollments Enrollment[]
+  lessonComments LessonComment[]
+  orders       PurchaseOrder[]
+  checkoutRateLimit CheckoutRateLimit?
+
   @@map("users")
 }
 
@@ -173,6 +178,8 @@ model Course {
   createdBy   User           @relation("CourseCreator", fields: [createdById], references: [id], onDelete: Restrict)
   sections    CourseSection[]
   reviews     CourseReview[]
+  enrollments Enrollment[]
+  orders      PurchaseOrder[]
 
   @@index([categoryId])
   @@index([instructorId])
@@ -220,6 +227,7 @@ model CourseLesson {
 
   section   CourseSection  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
   resources LessonResource[]
+  comments  LessonComment[]
 
   @@unique([sectionId, position])
   @@index([sectionId])
@@ -243,6 +251,21 @@ model LessonResource {
   @@unique([lessonId, position])
   @@index([lessonId])
   @@map("lesson_resources")
+}
+
+model LessonComment {
+  id        String   @id @default(uuid()) @db.Uuid
+  lessonId  String   @db.Uuid
+  authorId  String   @db.Uuid
+  body      String   @db.VarChar(2000)
+  createdAt DateTime @default(now())
+
+  lesson CourseLesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  author User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([lessonId, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([authorId])
+  @@map("lesson_comments")
 }
 
 model CourseReview {
@@ -396,4 +419,210 @@ model PromotionalPopup {
   @@index([status, startsAt, endsAt])
   @@index([priority, createdAt, id])
   @@map("website_promotional_popups")
+}
+
+
+enum EnrollmentStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+  REVOKED
+}
+
+enum EnrollmentSource {
+  FREE
+  PAID
+  ADMIN
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  CANCELLED
+  EXPIRED
+  PARTIALLY_REFUNDED
+  REFUNDED
+  FAILED
+}
+
+enum PaymentProvider {
+  STRIPE
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  EXPIRED
+  PARTIALLY_REFUNDED
+  REFUNDED
+}
+
+enum WebhookStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+  IGNORED
+}
+
+enum RefundStatus {
+  PENDING
+  REQUIRES_ACTION
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+model Enrollment {
+  id               String           @id @default(uuid()) @db.Uuid
+  userId           String           @db.Uuid
+  courseId         String           @db.Uuid
+  orderId          String?          @unique @db.Uuid
+  status           EnrollmentStatus @default(ACTIVE)
+  source           EnrollmentSource
+  enrolledAt       DateTime         @default(now())
+  completedAt      DateTime?
+  revokedAt        DateTime?
+  revocationReason String?          @db.VarChar(120)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  user   User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  course Course        @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  order  PurchaseOrder? @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, courseId])
+  @@index([courseId, status])
+  @@index([enrolledAt, id])
+  @@map("enrollments")
+}
+
+model PurchaseOrder {
+  id                    String      @id @default(uuid()) @db.Uuid
+  orderNumber           String      @unique @db.VarChar(50)
+  userId                String      @db.Uuid
+  courseId              String      @db.Uuid
+  courseTitleSnapshot   String      @db.VarChar(180)
+  currency              String      @db.VarChar(3)
+  subtotalMinorUnits    Int
+  discountMinorUnits    Int
+  totalMinorUnits       Int
+  status                OrderStatus @default(PENDING)
+  isTestMode            Boolean     @default(true)
+  successfulPaymentId   String?     @unique @db.Uuid
+  reconciliationReason  String?     @db.VarChar(120)
+  paidAt                DateTime?
+  expiresAt             DateTime
+  cancelledAt           DateTime?
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+
+  user              User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  course            Course       @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  payments          Payment[]    @relation("OrderAttempts")
+  successfulPayment Payment?     @relation("SuccessfulPayment", fields: [successfulPaymentId], references: [id], onDelete: Restrict)
+  enrollment        Enrollment?
+
+  @@index([userId, courseId, status])
+  @@index([courseId])
+  @@index([isTestMode, status, createdAt, id])
+  @@map("orders")
+}
+
+model Payment {
+  id                      String          @id @default(uuid()) @db.Uuid
+  orderId                 String          @db.Uuid
+  provider                PaymentProvider @default(STRIPE)
+  status                  PaymentStatus   @default(PENDING)
+  amountMinorUnits        Int
+  refundedMinorUnits      Int             @default(0)
+  currency                String          @db.VarChar(3)
+  isTestMode              Boolean         @default(true)
+  stripeCheckoutSessionId String?         @unique @db.VarChar(255)
+  stripePaymentIntentId   String?         @unique @db.VarChar(255)
+  stripeChargeId          String?         @unique @db.VarChar(255)
+  receiptUrl              String?         @db.VarChar(2048)
+  idempotencyKey          String          @unique @db.VarChar(255)
+  checkoutOrigin          String          @db.VarChar(255)
+  failureCode             String?         @db.VarChar(120)
+  failureMessage          String?         @db.VarChar(240)
+  reconciliationReason    String?         @db.VarChar(120)
+  reconciliationVersion   Int             @default(0)
+  lastCheckedAt           DateTime?
+  paidAt                  DateTime?
+  expiresAt               DateTime
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
+
+  order           PurchaseOrder   @relation("OrderAttempts", fields: [orderId], references: [id], onDelete: Restrict)
+  fulfilledOrder  PurchaseOrder?  @relation("SuccessfulPayment")
+  refunds         Refund[]
+  disputes        PaymentDispute[]
+
+  @@index([orderId, status])
+  @@index([isTestMode, status, createdAt, id])
+  @@map("payments")
+}
+
+model Refund {
+  id            String       @id @default(uuid()) @db.Uuid
+  paymentId     String       @db.Uuid
+  stripeRefundId String      @unique @db.VarChar(255)
+  amountMinorUnits Int
+  currency      String       @db.VarChar(3)
+  status        RefundStatus
+  reason        String?      @db.VarChar(80)
+  createdAt     DateTime
+  updatedAt     DateTime     @updatedAt
+  payment       Payment      @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@index([paymentId, status])
+  @@map("refunds")
+}
+
+model PaymentDispute {
+  id              String   @id @default(uuid()) @db.Uuid
+  paymentId       String   @db.Uuid
+  stripeDisputeId String   @unique @db.VarChar(255)
+  amountMinorUnits Int
+  currency        String   @db.VarChar(3)
+  status          String   @db.VarChar(60)
+  reason          String   @db.VarChar(80)
+  createdAt       DateTime
+  updatedAt       DateTime @updatedAt
+  payment         Payment  @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@index([paymentId])
+  @@map("payment_disputes")
+}
+
+model WebhookEvent {
+  id             String        @id @default(uuid()) @db.Uuid
+  stripeEventId  String        @unique @db.VarChar(255)
+  eventType      String        @db.VarChar(100)
+  stripeObjectId String?       @db.VarChar(255)
+  isTestMode     Boolean
+  status         WebhookStatus @default(PENDING)
+  attempts       Int           @default(0)
+  leaseToken     String?       @db.Uuid
+  leaseUntil     DateTime?
+  lastError      String?       @db.VarChar(100)
+  receivedAt     DateTime      @default(now())
+  processedAt    DateTime?
+  updatedAt      DateTime      @updatedAt
+
+  @@index([status, receivedAt, id])
+  @@map("webhook_events")
+}
+
+model CheckoutRateLimit {
+  userId      String   @id @db.Uuid
+  windowStart DateTime
+  requests    Int
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("checkout_rate_limits")
 }

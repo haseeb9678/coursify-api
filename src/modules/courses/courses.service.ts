@@ -70,7 +70,7 @@ export class CoursesService {
         status: CourseStatus; isFeatured: boolean; submittedAt: Date | null; approvedAt: Date | null;
         publishedAt: Date | null; archivedAt: Date | null; createdAt: Date; updatedAt: Date;
         sections: Array<{ _count: { lessons: number } }>;
-        _count: { reviews: number };
+        _count: { reviews: number; enrollments: number; orders: number };
     }) {
         return {
             id: course.id,
@@ -95,7 +95,7 @@ export class CoursesService {
             targetAudience: course.targetAudience,
             status: course.status,
             isFeatured: course.isFeatured,
-            canDelete: canDeleteCourse(course.status, course._count.reviews),
+            canDelete: canDeleteCourse(course.status, course._count.reviews) && !course._count.enrollments && !course._count.orders,
             sectionCount: course.sections.length,
             lessonCount: course.sections.reduce((total, section) => total + section._count.lessons, 0),
             submittedAt: course.submittedAt,
@@ -107,19 +107,26 @@ export class CoursesService {
         };
     }
 
-    private readonly courseSelect = {
+    private readonly publicCourseSelect = {
         id: true, title: true, slug: true, shortDescription: true, description: true,
         thumbnailUrl: true, promotionalVideoUrl: true,
-        category: { select: { id: true, name: true, slug: true, status: true } },
-        instructor: { select: { id: true, name: true, avatar: true, role: true, status: true } },
+        category: { select: { id: true, name: true, slug: true } },
+        instructor: { select: { id: true, name: true, avatar: true } },
         level: true, language: true, pricingType: true, priceMinorUnits: true,
         discountedPriceMinorUnits: true, currency: true, learningOutcomes: true,
-        requirements: true, targetAudience: true, status: true, isFeatured: true,
+        requirements: true, targetAudience: true, updatedAt: true,
+    } as const satisfies Prisma.CourseSelect;
+
+    private readonly courseSelect = {
+        ...this.publicCourseSelect,
+        category: { select: { id: true, name: true, slug: true, status: true } },
+        instructor: { select: { id: true, name: true, avatar: true, role: true, status: true } },
+        status: true, isFeatured: true,
         submittedAt: true, approvedAt: true, publishedAt: true, archivedAt: true,
-        createdAt: true, updatedAt: true,
+        createdAt: true,
         sections: { select: { _count: { select: { lessons: true } } } },
-        _count: { select: { reviews: true } },
-    } as const;
+        _count: { select: { reviews: true, enrollments: true, orders: true } },
+    } as const satisfies Prisma.CourseSelect;
 
     async findCourses(pagination: PaginationInput, filter?: AdminCoursesFilterInput, sort?: AdminCourseSortInput) {
         const window = getPaginationWindow(pagination);
@@ -360,9 +367,12 @@ export class CoursesService {
     async deleteCourse(id: string) {
         return courseTransaction(this.prisma, async (transaction) => {
             const course = await transaction.course.findUnique({
-                where: { id }, select: { status: true, _count: { select: { reviews: true } } },
+                where: { id }, select: { status: true, _count: { select: { reviews: true, enrollments: true, orders: true } } },
             });
             if (!course) throw new NotFoundException('Course not found');
+            if (course._count.enrollments || course._count.orders) {
+                throw new ConflictException('Courses with enrollment or order history cannot be deleted');
+            }
             if (!canDeleteCourse(course.status, course._count.reviews)) {
                 throw new ConflictException('Only drafts without review history can be deleted');
             }
@@ -509,7 +519,7 @@ export class CoursesService {
             this.prisma.course.findMany({
                 where, orderBy: [{ publishedAt: 'desc' }, { id: 'asc' }],
                 skip: window.skip, take: window.take,
-                select: this.courseSelect,
+                select: this.publicCourseSelect,
             }),
             this.prisma.course.count({ where }),
         ]);
@@ -551,7 +561,7 @@ export class CoursesService {
                 instructor: { role: UserRole.INSTRUCTOR, status: UserStatus.ACTIVE },
             },
             select: {
-                ...this.courseSelect,
+                ...this.publicCourseSelect,
                 sections: {
                     orderBy: { position: 'asc' },
                     select: {
@@ -591,7 +601,7 @@ export class CoursesService {
             },
             orderBy: [{ publishedAt: 'desc' }, { id: 'asc' }],
             take: bounded,
-            select: this.courseSelect,
+            select: this.publicCourseSelect,
         });
         return Promise.all(courses.map((course) => this.mapPublicCourse(course)));
     }
@@ -612,7 +622,7 @@ export class CoursesService {
             },
             orderBy: [{ publishedAt: 'desc' }, { id: 'asc' }],
             take: bounded,
-            select: this.courseSelect,
+            select: this.publicCourseSelect,
         });
         return Promise.all(courses.map((item) => this.mapPublicCourse(item)));
     }

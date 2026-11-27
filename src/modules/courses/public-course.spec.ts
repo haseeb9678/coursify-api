@@ -21,7 +21,13 @@ describe('Public course details', () => {
             updatedAt: new Date('2026-11-22T00:00:00.000Z'),
             sections: [{ title: 'Getting started', lessons: [{ ...lesson, _count: { resources: 2 } }] }],
         });
-        const prisma = { course: { findFirst } } as unknown as PrismaService;
+        const findMany = vi.fn().mockResolvedValue([]);
+        const findUnique = vi.fn().mockResolvedValue({ categoryId: "category-id" });
+        const count = vi.fn().mockResolvedValue(0);
+        const prisma = {
+            course: { findFirst, findMany, findUnique, count },
+            $transaction: (queries: Promise<unknown>[]) => Promise.all(queries),
+        } as unknown as PrismaService;
         const resolver = new PublicCoursesResolver(new CoursesService(prisma));
         const module = await Test.createTestingModule({
             imports: [GraphQLSchemaBuilderModule],
@@ -78,6 +84,14 @@ describe('Public course details', () => {
                     },
                 }),
             }));
+            const publicSelect = expect.not.objectContaining({ _count: expect.anything() });
+            expect(findFirst).toHaveBeenCalledWith(expect.objectContaining({ select: publicSelect }));
+            await resolver.courses({ page: 1, limit: 10 });
+            await resolver.featuredCourses(6);
+            await resolver.relatedCourses(id, 6);
+            expect(findMany).toHaveBeenCalledTimes(3);
+            for (const [query] of findMany.mock.calls) expect(query.select).not.toHaveProperty('_count');
+
             const lessonType = schema.getType('PublicCourseLesson');
             expect(isObjectType(lessonType) && Object.keys(lessonType.getFields()).sort()).toEqual([
                 'durationSeconds', 'isPreview', 'resourceCount', 'title',

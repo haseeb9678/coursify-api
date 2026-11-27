@@ -7,6 +7,7 @@ import {
     IsNotEmpty,
     IsUrl,
     IsIn,
+    ValidateIf,
     Matches,
     Min,
     Max,
@@ -81,6 +82,29 @@ class EnvironmentVariables {
     @IsInt()
     @Min(1)
     JWT_REFRESH_EXPIRES_IN: number = 604800;
+
+    // Sandbox checkout is opt-in. Empty secrets leave the rest of the LMS available.
+    @IsIn(['true', 'false'])
+    PAYMENTS_ENABLED: string = 'false';
+
+    @IsIn(['test'])
+    STRIPE_MODE: string = 'test';
+
+    @ValidateIf((_config, value: unknown) => value !== undefined && value !== '')
+    @Matches(/^(?:sk|rk)_test_[A-Za-z0-9]+$/, { message: 'STRIPE_SECRET_KEY must use Sandbox credentials.' })
+    STRIPE_SECRET_KEY?: string;
+
+    @ValidateIf((_config, value: unknown) => value !== undefined && value !== '')
+    @Matches(/^whsec_[A-Za-z0-9]+$/, { message: 'STRIPE_WEBHOOK_SECRET must use a signing secret.' })
+    STRIPE_WEBHOOK_SECRET?: string;
+
+    @ValidateIf((_config, value: unknown) => value !== undefined && value !== '')
+    @Matches(/^[1-9][0-9]{0,7}$/)
+    STRIPE_USD_MIN_MINOR_UNITS?: string;
+
+    @ValidateIf((_config, value: unknown) => value !== undefined && value !== '')
+    @Matches(/^[1-9][0-9]{0,7}$/)
+    STRIPE_PKR_MIN_MINOR_UNITS?: string;
 
     // Cookie configuration
 
