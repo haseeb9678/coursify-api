@@ -1,4 +1,5 @@
 import { plainToInstance } from 'class-transformer';
+import { storageConfig } from './storage.config.js';
 
 import {
     IsEnum,
@@ -201,6 +202,12 @@ export function validateEnv(
                 'FRONTEND_URL must be a valid URL.',
             );
         }
+    }
+
+    try {
+        storageConfig((name) => config[name]);
+    } catch (error) {
+        if (error instanceof Error) messages.push(error.message);
     }
 
     // Throw combined validation errors

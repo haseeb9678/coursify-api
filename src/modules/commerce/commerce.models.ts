@@ -200,6 +200,7 @@ export class CommerceLearningResource {
     @Field(() => String) title!: string;
     @Field(() => String) type!: string;
     @Field(() => String) url!: string;
+    @Field(() => Boolean) hasManagedMedia!: boolean;
 }
 
 @ObjectType()
@@ -212,6 +213,7 @@ export class CommerceLearningLesson {
     @Field(() => String, { nullable: true }) videoUrl?: string | null;
     @Field(() => String, { nullable: true }) documentUrl?: string | null;
     @Field(() => Int, { nullable: true }) durationSeconds?: number | null;
+    @Field(() => Boolean) hasManagedMedia!: boolean;
     @Field(() => [CommerceLearningResource]) resources!: CommerceLearningResource[];
 }
 

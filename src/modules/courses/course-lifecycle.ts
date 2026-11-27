@@ -34,9 +34,13 @@ export function assertCourseStatus(status: CourseStatus, expectedStatus: CourseS
 export async function courseTransaction<T>(
     prisma: PrismaService,
     work: (transaction: Prisma.TransactionClient) => Promise<T>,
+    timeout?: number,
 ): Promise<T> {
     try {
-        return await prisma.$transaction(work, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        return await prisma.$transaction(work, {
+            isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+            ...(timeout === undefined ? {} : { timeout }),
+        });
     } catch (error) {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
             throw new ConflictException('The course changed during this operation. Refresh it and try again.');

@@ -17,6 +17,7 @@ import {
     AdminReorderCourseLessonsInput,
     AdminReorderCourseSectionsInput,
     AdminReorderLessonResourcesInput,
+    AdminSaveCourseLessonInput,
     AdminUpdateCourseLessonInput,
     AdminUpdateCourseSectionInput,
     AdminUpdateLessonResourceInput,
@@ -94,9 +95,15 @@ export class AdminCurriculumResolver {
     }
 
     @Mutation(() => LessonMutationResponse, { name: 'adminUpdateCourseLesson' })
-    async adminUpdateCourseLesson(@Args('input') input: AdminUpdateCourseLessonInput) {
-        const lesson = await this.service.updateLesson(input);
+    async adminUpdateCourseLesson(@Args('input') input: AdminUpdateCourseLessonInput, @CurrentUser() actor: AuthenticatedUser) {
+        const lesson = await this.service.updateLesson(input, actor);
         return { ...createMutationResponse('Course lesson updated successfully'), lesson };
+    }
+
+    @Mutation(() => LessonMutationResponse)
+    async adminSaveCourseLesson(@Args('input') input: AdminSaveCourseLessonInput, @CurrentUser() actor: AuthenticatedUser) {
+        const lesson = await this.service.saveLesson(input, actor);
+        return { ...createMutationResponse('Course lesson saved successfully'), lesson };
     }
 
     @Mutation(() => MutationResponse, { name: 'adminDeleteCourseLesson' })
@@ -120,14 +127,14 @@ export class AdminCurriculumResolver {
     }
 
     @Mutation(() => ResourceMutationResponse, { name: 'adminCreateLessonResource' })
-    async adminCreateLessonResource(@Args('input') input: AdminCreateLessonResourceInput) {
-        const resource = await this.service.createResource(input);
+    async adminCreateLessonResource(@Args('input') input: AdminCreateLessonResourceInput, @CurrentUser() actor: AuthenticatedUser) {
+        const resource = await this.service.createResource(input, actor);
         return { ...createMutationResponse('Lesson resource created successfully'), resource };
     }
 
     @Mutation(() => ResourceMutationResponse, { name: 'adminUpdateLessonResource' })
-    async adminUpdateLessonResource(@Args('input') input: AdminUpdateLessonResourceInput) {
-        const resource = await this.service.updateResource(input);
+    async adminUpdateLessonResource(@Args('input') input: AdminUpdateLessonResourceInput, @CurrentUser() actor: AuthenticatedUser) {
+        const resource = await this.service.updateResource(input, actor);
         return { ...createMutationResponse('Lesson resource updated successfully'), resource };
     }
 

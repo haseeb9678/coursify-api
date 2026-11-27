@@ -74,9 +74,12 @@ describe('Public course details', () => {
                             lessons: {
                                 orderBy: { position: 'asc' },
                                 select: {
+                                    id: true,
                                     title: true,
                                     durationSeconds: true,
                                     isPreview: true,
+                                    type: true,
+                                    videoAssetId: true,
                                     _count: { select: { resources: true } },
                                 },
                             },
@@ -94,7 +97,7 @@ describe('Public course details', () => {
 
             const lessonType = schema.getType('PublicCourseLesson');
             expect(isObjectType(lessonType) && Object.keys(lessonType.getFields()).sort()).toEqual([
-                'durationSeconds', 'isPreview', 'resourceCount', 'title',
+                'durationSeconds', 'isPreview', 'previewLessonId', 'resourceCount', 'title',
             ]);
 
             findFirst.mockResolvedValueOnce(null);

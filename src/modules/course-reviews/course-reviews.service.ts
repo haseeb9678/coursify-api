@@ -10,7 +10,6 @@ import {
     CourseReviewDecision,
     CourseStatus,
     CoursePricingType,
-    LessonType,
     CategoryStatus,
     UserRole,
     UserStatus,
@@ -20,6 +19,7 @@ import { PaginationInput } from '../../common/pagination/pagination.input.js';
 import { createPaginationMeta, getPaginationWindow } from '../../common/pagination/pagination.utils.js';
 import { mapPrismaError } from '../../common/utils/prisma-error.util.js';
 import { assertCourseTransition, courseTransaction } from '../courses/course-lifecycle.js';
+import { lessonReadinessErrors, lessonReadinessSelect, type LessonReadiness } from '../courses/lesson-readiness.js';
 import type { AuthenticatedUser } from '../auth/types/authenticated-user.type.js';
 import {
     AdminApproveCourseInput,
@@ -48,7 +48,7 @@ export class CourseReviewsService {
                 _count: { select: { lessons: true } },
                 lessons: {
                     orderBy: { position: 'asc' as const },
-                    select: { title: true, type: true, content: true, videoUrl: true, documentUrl: true, durationSeconds: true },
+                    select: lessonReadinessSelect,
                 },
             },
             orderBy: { position: 'asc' as const },
@@ -133,14 +133,7 @@ export class CourseReviewsService {
         learningOutcomes: string[];
         category: { status: CategoryStatus };
         instructor: { role: UserRole; status: UserStatus };
-        sections: Array<{ lessons: Array<{
-            title: string;
-            type: LessonType;
-            content: string;
-            videoUrl: string | null;
-            documentUrl: string | null;
-            durationSeconds: number | null;
-        }> }>;
+        sections: Array<{ lessons: LessonReadiness[] }>;
     }): string[] {
         const errors: string[] = [];
         if (course.title.trim().length < 2) errors.push('Course title is required');
@@ -162,15 +155,7 @@ export class CourseReviewsService {
         for (const section of course.sections) {
             if (section.lessons.length === 0) errors.push('Every section must contain at least one lesson');
             for (const lesson of section.lessons) {
-                if (lesson.type === LessonType.VIDEO && (!lesson.videoUrl || (lesson.durationSeconds ?? 0) <= 0)) {
-                    errors.push(`Video lesson "${lesson.title}" requires a URL and positive duration`);
-                }
-                if (lesson.type === LessonType.TEXT && lesson.content.trim().length < 20) {
-                    errors.push(`Text lesson "${lesson.title}" requires content`);
-                }
-                if (lesson.type === LessonType.PDF && !lesson.documentUrl) {
-                    errors.push(`PDF lesson "${lesson.title}" requires a document URL`);
-                }
+                errors.push(...lessonReadinessErrors(lesson));
             }
         }
         return errors;

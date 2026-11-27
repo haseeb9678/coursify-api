@@ -32,6 +32,7 @@ import {
 } from './dto/course.inputs.js';
 import { assertCourseStatus, assertCourseTransition, canDeleteCourse, canEditCourse, courseTransaction } from './course-lifecycle.js';
 import { AdminCourseSortField } from './enums/course.enums.js';
+import { lessonReadinessErrors, lessonReadinessSelect, type LessonReadiness } from './lesson-readiness.js';
 
 function normalizeSlug(value: string): string {
     return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim()
@@ -440,7 +441,7 @@ export class CoursesService {
                     orderBy: { position: 'asc' },
                     select: {
                         lessons: {
-                            select: { title: true, type: true, content: true, videoUrl: true, documentUrl: true, durationSeconds: true },
+                            select: lessonReadinessSelect,
                             orderBy: { position: 'asc' },
                         },
                     },
@@ -462,7 +463,7 @@ export class CoursesService {
         instructor: { status?: UserStatus; role?: UserRole } | null;
         pricingType: CoursePricingType; priceMinorUnits: number;
         discountedPriceMinorUnits: number | null; learningOutcomes: string[];
-        sections: Array<{ lessons: Array<{ title: string; type: string; content: string; videoUrl: string | null; documentUrl: string | null; durationSeconds: number | null }> }>;
+        sections: Array<{ lessons: LessonReadiness[] }>;
     }) {
         const errors: string[] = [];
         if (course.title.trim().length < 2) errors.push('Course title is required');
@@ -479,15 +480,7 @@ export class CoursesService {
             if (section.lessons.length === 0) errors.push('Every section must contain at least one lesson');
             for (const lesson of section.lessons) {
                 if (lesson.title.trim().length < 2) errors.push('Every lesson requires a title');
-                if (lesson.type === 'VIDEO' && (!lesson.videoUrl || (lesson.durationSeconds ?? 0) <= 0)) {
-                    errors.push(`Video lesson "${lesson.title}" requires a video URL and duration`);
-                }
-                if (lesson.type === 'TEXT' && lesson.content.trim().length < 20) {
-                    errors.push(`Text lesson "${lesson.title}" requires text content`);
-                }
-                if (lesson.type === 'PDF' && !lesson.documentUrl) {
-                    errors.push(`PDF lesson "${lesson.title}" requires a document URL`);
-                }
+                errors.push(...lessonReadinessErrors(lesson));
             }
         }
         if (errors.length > 0) throw new BadRequestException(`Course is not ready for review: ${errors.join('; ')}`);
@@ -569,7 +562,7 @@ export class CoursesService {
                         lessons: {
                             orderBy: { position: 'asc' },
                             select: {
-                                title: true, durationSeconds: true, isPreview: true,
+                                id: true, title: true, durationSeconds: true, isPreview: true, type: true, videoAssetId: true,
                                 _count: { select: { resources: true } },
                             },
                         },
@@ -583,8 +576,9 @@ export class CoursesService {
             ...await this.mapPublicCourse(course),
             curriculum: course.sections.map(({ title, lessons }) => ({
                 title,
-                lessons: lessons.map(({ title, durationSeconds, isPreview, _count }) => ({
+                lessons: lessons.map(({ id, title, durationSeconds, isPreview, type, videoAssetId, _count }) => ({
                     title, durationSeconds, isPreview, resourceCount: _count.resources,
+                    ...(isPreview && type === 'VIDEO' && videoAssetId ? { previewLessonId: id } : {}),
                 })),
             })),
         };

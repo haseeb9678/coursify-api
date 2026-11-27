@@ -19,11 +19,18 @@ export class LessonResourceEntity {
     @Field(() => String) title!: string;
     @Field(() => LessonResourceType) type!: LessonResourceType;
     @Field(() => String) url!: string;
+    @Field(() => ID, { nullable: true }) mediaAssetId?: string | null;
     @Field(() => String, { nullable: true }) fileName!: string | null;
     @Field(() => Int, { nullable: true }) fileSize!: number | null;
     @Field(() => Int) position!: number;
     @Field(() => GraphQLISODateTime) createdAt!: Date;
     @Field(() => GraphQLISODateTime) updatedAt!: Date;
+}
+
+@ObjectType()
+export class LessonVideoQualityEntity {
+    @Field(() => Int) height!: number;
+    @Field(() => ID) assetId!: string;
 }
 
 @ObjectType()
@@ -36,6 +43,9 @@ export class CourseLessonEntity {
     @Field(() => String) content!: string;
     @Field(() => String, { nullable: true }) videoUrl!: string | null;
     @Field(() => String, { nullable: true }) documentUrl!: string | null;
+    @Field(() => ID, { nullable: true }) videoAssetId?: string | null;
+    @Field(() => ID, { nullable: true }) documentAssetId?: string | null;
+    @Field(() => [LessonVideoQualityEntity], { nullable: true }) videoQualities?: LessonVideoQualityEntity[];
     @Field(() => Int, { nullable: true }) durationSeconds!: number | null;
     @Field(() => Int) position!: number;
     @Field(() => Boolean) isPreview!: boolean;

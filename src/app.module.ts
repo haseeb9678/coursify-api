@@ -46,6 +46,7 @@ import { CurriculumModule } from './modules/curriculum/curriculum.module.js';
 import { CommerceModule } from './modules/commerce/commerce.module.js';
 import { WebsiteModule } from './modules/website/website.module.js';
 import { CourseReviewsModule } from './modules/course-reviews/course-reviews.module.js';
+import { StorageModule } from './modules/storage/storage.module.js';
 
 @Module({
   imports: [
@@ -123,6 +124,7 @@ import { CourseReviewsModule } from './modules/course-reviews/course-reviews.mod
     CourseReviewsModule,
     WebsiteModule,
     CommerceModule,
+    StorageModule,
   ],
 
   controllers: [

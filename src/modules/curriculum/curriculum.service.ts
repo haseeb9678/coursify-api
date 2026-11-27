@@ -15,6 +15,7 @@ import { PrismaService } from '../../database/prisma.service.js';
 import { mapPrismaError } from '../../common/utils/prisma-error.util.js';
 import { canEditCourse, courseTransaction } from '../courses/course-lifecycle.js';
 import type { AuthenticatedUser } from '../auth/types/authenticated-user.type.js';
+import { privateAssetForAttachment } from '../storage/storage.service.js';
 import {
     AdminCreateCourseLessonInput,
     AdminCreateCourseSectionInput,
@@ -23,6 +24,8 @@ import {
     AdminReorderCourseLessonsInput,
     AdminReorderCourseSectionsInput,
     AdminReorderLessonResourcesInput,
+    AdminSaveCourseLessonInput,
+    LessonVideoQualityInput,
     AdminUpdateCourseLessonInput,
     AdminUpdateCourseSectionInput,
     AdminUpdateLessonResourceInput,
@@ -35,8 +38,10 @@ function validateSafeUrl(value: string): void {
     } catch {
         throw new BadRequestException('Invalid URL');
     }
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-        throw new BadRequestException('Only HTTP(S) URLs are allowed');
+    const localHttp = url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname);
+    if ((url.protocol !== 'https:' && !localHttp) || url.username || url.password ||
+        [...url.searchParams.keys()].some((key) => key.toLowerCase().startsWith('x-amz-'))) {
+        throw new BadRequestException('Enter a public HTTPS link.');
     }
 }
 
@@ -44,6 +49,10 @@ function validateSafeUrl(value: string): void {
 export class CurriculumService {
     private readonly logger = new Logger(CurriculumService.name);
     constructor(private readonly prisma: PrismaService) {}
+
+    private write<T>(transaction: Prisma.TransactionClient | undefined, work: (client: Prisma.TransactionClient) => Promise<T>) {
+        return transaction ? work(transaction) : courseTransaction(this.prisma, work);
+    }
 
     private async assertCourseEditable(courseId: string, transaction: Prisma.TransactionClient) {
         // Coordinate curriculum writes with lifecycle updates to this course row.
@@ -70,13 +79,14 @@ export class CurriculumService {
                             orderBy: { position: 'asc' },
                             select: {
                                 id: true, sectionId: true, title: true, description: true, type: true,
-                                content: true, videoUrl: true, documentUrl: true, durationSeconds: true,
+                                content: true, videoUrl: true, documentUrl: true, videoAssetId: true, documentAssetId: true, durationSeconds: true,
+                                videoQualities: { orderBy: { height: 'asc' } },
                                 position: true, isPreview: true, createdAt: true, updatedAt: true,
                                 resources: {
                                     orderBy: { position: 'asc' },
                                     select: {
                                         id: true, title: true, type: true, url: true, fileName: true,
-                                        fileSize: true, position: true, createdAt: true, updatedAt: true,
+                                        fileSize: true, mediaAssetId: true, position: true, createdAt: true, updatedAt: true,
                                     },
                                 },
                             },
@@ -125,7 +135,8 @@ export class CurriculumService {
                     orderBy: { position: 'asc' },
                     select: {
                         id: true, sectionId: true, title: true, description: true, type: true,
-                        content: true, videoUrl: true, documentUrl: true, durationSeconds: true,
+                        content: true, videoUrl: true, documentUrl: true, videoAssetId: true, documentAssetId: true, durationSeconds: true,
+                        videoQualities: { orderBy: { height: 'asc' } },
                         position: true, isPreview: true, createdAt: true, updatedAt: true,
                         resources: { orderBy: { position: 'asc' } },
                     },
@@ -141,7 +152,8 @@ export class CurriculumService {
             where: { id: lessonId },
             select: {
                 id: true, sectionId: true, title: true, description: true, type: true,
-                content: true, videoUrl: true, documentUrl: true, durationSeconds: true,
+                content: true, videoUrl: true, documentUrl: true, videoAssetId: true, documentAssetId: true, durationSeconds: true,
+                videoQualities: { orderBy: { height: 'asc' } },
                 position: true, isPreview: true, createdAt: true, updatedAt: true,
                 resources: { orderBy: { position: 'asc' } },
             },
@@ -264,17 +276,17 @@ export class CurriculumService {
         });
     }
 
-    async createLesson(input: AdminCreateCourseLessonInput, actor: AuthenticatedUser) {
-        return courseTransaction(this.prisma, async (transaction) => {
+    async createLesson(input: AdminCreateCourseLessonInput, actor: AuthenticatedUser, tx?: Prisma.TransactionClient) {
+        return this.write(tx, async (transaction) => {
             const section = await transaction.courseSection.findUnique({
                 where: { id: input.sectionId },
                 select: { id: true, courseId: true },
             });
             if (!section) throw new NotFoundException('Course section not found');
             await this.assertCourseEditable(section.courseId, transaction);
-            this.validateLesson(input.type, input.content, input.videoUrl, input.documentUrl, input.durationSeconds);
-            if (input.videoUrl) validateSafeUrl(input.videoUrl);
-            if (input.documentUrl) validateSafeUrl(input.documentUrl);
+            if (input.videoUrl || input.documentUrl) throw new BadRequestException('Upload new lesson files directly from your device.');
+            this.validateLesson(input.type, input.content, input.durationSeconds);
+            const media = await this.lessonAsset(transaction, input.type, input.mediaAssetId, actor.userId, section.courseId);
             const count = await transaction.courseLesson.count({ where: { sectionId: input.sectionId } });
             const lesson = await transaction.courseLesson.create({
                 data: {
@@ -283,8 +295,8 @@ export class CurriculumService {
                     description: input.description?.trim() ?? '',
                     type: input.type,
                     content: input.content?.trim() ?? '',
-                    videoUrl: input.videoUrl?.trim() || null,
-                    documentUrl: input.documentUrl?.trim() || null,
+                    videoAssetId: input.type === 'VIDEO' ? media?.id : null,
+                    documentAssetId: input.type === 'PDF' ? media?.id : null,
                     durationSeconds: input.durationSeconds ?? null,
                     position: count,
                     isPreview: input.isPreview,
@@ -298,45 +310,65 @@ export class CurriculumService {
         });
     }
 
-    private validateLesson(type: LessonType, content?: string, videoUrl?: string | null, documentUrl?: string | null, duration?: number | null) {
-        if (type === LessonType.VIDEO && (videoUrl || duration !== undefined)) {
-            if (videoUrl) validateSafeUrl(videoUrl);
-            if (duration !== undefined && duration !== null && duration < 0) throw new BadRequestException('Duration must be non-negative');
-        }
+    private validateLesson(type: LessonType, content?: string, duration?: number | null) {
+        if (type === LessonType.VIDEO && duration != null && duration < 0) throw new BadRequestException('Duration must be non-negative');
         if (type === LessonType.TEXT && content !== undefined && content.length > 10000) {
             throw new BadRequestException('Text content is too long');
         }
-        if (type === LessonType.PDF && documentUrl) validateSafeUrl(documentUrl);
     }
 
-    async updateLesson(input: AdminUpdateCourseLessonInput) {
-        return courseTransaction(this.prisma, async (transaction) => {
+    private lessonAsset(tx: Prisma.TransactionClient, type: LessonType, assetId: string | undefined, userId: string, courseId: string) {
+        if (type === 'TEXT') {
+            if (assetId) throw new BadRequestException('Text lessons do not have a primary file.');
+            return null;
+        }
+        if (!assetId) throw new BadRequestException(type === 'VIDEO' ? 'Upload a verified MP4 video.' : 'Upload a verified PDF.');
+        return privateAssetForAttachment(tx, assetId, userId, courseId, type === 'VIDEO' ? 'LESSON_VIDEO' : 'LESSON_DOCUMENT');
+    }
+
+    async updateLesson(input: AdminUpdateCourseLessonInput, actor: AuthenticatedUser, tx?: Prisma.TransactionClient) {
+        return this.write(tx, async (transaction) => {
             const existing = await transaction.courseLesson.findUnique({
                 where: { id: input.id },
                 select: { id: true, section: { select: { courseId: true } }, type: true, content: true,
-                    videoUrl: true, documentUrl: true, durationSeconds: true },
+                    videoUrl: true, documentUrl: true, videoAssetId: true, documentAssetId: true, durationSeconds: true },
             });
             if (!existing) throw new NotFoundException('Course lesson not found');
             await this.assertCourseEditable(existing.section.courseId, transaction);
             const type = input.type ?? existing.type;
             const content = input.content !== undefined ? input.content : existing.content;
-            const videoUrl = input.videoUrl !== undefined ? input.videoUrl : existing.videoUrl;
-            const documentUrl = input.documentUrl !== undefined ? input.documentUrl : existing.documentUrl;
+            const videoUrl = type === 'VIDEO' && type === existing.type ? existing.videoUrl : null;
+            const documentUrl = type === 'PDF' && type === existing.type ? existing.documentUrl : null;
+            if ((input.videoUrl && input.videoUrl.trim() !== videoUrl) || (input.documentUrl && input.documentUrl.trim() !== documentUrl)) {
+                throw new BadRequestException('Replace lesson media with a verified local upload.');
+            }
+            const currentAssetId = type === 'VIDEO' ? existing.videoAssetId : type === 'PDF' ? existing.documentAssetId : null;
+            const media = (input.mediaAssetId && input.mediaAssetId !== currentAssetId) || (type !== 'TEXT' && type !== existing.type)
+                ? await this.lessonAsset(transaction, type, input.mediaAssetId, actor.userId, existing.section.courseId) : null;
             const duration = input.durationSeconds !== undefined ? input.durationSeconds : existing.durationSeconds;
-            this.validateLesson(type, content, videoUrl, documentUrl, duration);
-            const data: Prisma.CourseLessonUpdateInput = {
+            this.validateLesson(type, content, duration);
+            const data: Prisma.CourseLessonUncheckedUpdateInput = {
                 ...(input.title !== undefined ? { title: input.title.trim() } : {}),
                 ...(input.description !== undefined ? { description: input.description.trim() } : {}),
                 ...(input.type !== undefined ? { type: input.type } : {}),
                 ...(input.content !== undefined ? { content: input.content.trim() } : {}),
-                ...(input.videoUrl !== undefined ? { videoUrl: input.videoUrl?.trim() || null } : {}),
-                ...(input.documentUrl !== undefined ? { documentUrl: input.documentUrl?.trim() || null } : {}),
                 ...(input.durationSeconds !== undefined ? { durationSeconds: input.durationSeconds } : {}),
                 ...(input.isPreview !== undefined ? { isPreview: input.isPreview } : {}),
             };
+            if (media) {
+                data.videoUrl = null;
+                data.documentUrl = null;
+                data.videoAssetId = type === 'VIDEO' ? media.id : null;
+                data.documentAssetId = type === 'PDF' ? media.id : null;
+            }
             if (input.type === LessonType.TEXT) { data.videoUrl = null; data.documentUrl = null; }
             if (input.type === LessonType.VIDEO) { data.documentUrl = null; data.content = ''; }
             if (input.type === LessonType.PDF) { data.videoUrl = null; data.content = ''; }
+            if (type !== 'VIDEO') data.videoAssetId = null;
+            if (type !== 'PDF') data.documentAssetId = null;
+            if (media || type !== existing.type) {
+                await transaction.lessonVideoQuality.deleteMany({ where: { lessonId: input.id } });
+            }
             try {
                 return await transaction.courseLesson.update({
                     where: { id: input.id },
@@ -448,41 +480,58 @@ export class CurriculumService {
         return lesson.resources;
     }
 
-    async createResource(input: AdminCreateLessonResourceInput) {
-        return courseTransaction(this.prisma, async (transaction) => {
+    private async resourceAsset(tx: Prisma.TransactionClient, type: AdminCreateLessonResourceInput['type'], assetId: string | undefined, userId: string, courseId: string) {
+        if (type === 'LINK') {
+            if (assetId) throw new BadRequestException('Link resources require an external URL.');
+            return null;
+        }
+        if (!assetId) throw new BadRequestException('Upload a verified file for this resource.');
+        const asset = await privateAssetForAttachment(tx, assetId, userId, courseId, 'LESSON_RESOURCE');
+        if (type === 'PDF' && asset.mimeType !== 'application/pdf') throw new BadRequestException('Choose a verified PDF file.');
+        return asset;
+    }
+
+    async createResource(input: AdminCreateLessonResourceInput, actor: AuthenticatedUser, tx?: Prisma.TransactionClient) {
+        return this.write(tx, async (transaction) => {
             const lesson = await transaction.courseLesson.findUnique({
                 where: { id: input.lessonId },
                 select: { id: true, section: { select: { courseId: true } } },
             });
             if (!lesson) throw new NotFoundException('Course lesson not found');
             await this.assertCourseEditable(lesson.section.courseId, transaction);
-            validateSafeUrl(input.url);
+            const asset = await this.resourceAsset(transaction, input.type, input.mediaAssetId, actor.userId, lesson.section.courseId);
+            if (!asset) validateSafeUrl(input.url);
             const count = await transaction.lessonResource.count({ where: { lessonId: input.lessonId } });
             return transaction.lessonResource.create({
                 data: {
                     lessonId: input.lessonId,
                     title: input.title.trim(),
                     type: input.type,
-                    url: input.url.trim(),
-                    fileName: input.fileName?.trim() || null,
-                    fileSize: input.fileSize ?? null,
+                    url: asset ? '' : input.url.trim(),
+                    mediaAssetId: asset?.id,
+                    fileName: asset?.originalFileName ?? (input.fileName?.trim() || null),
+                    fileSize: asset?.sizeBytes ?? input.fileSize ?? null,
                     position: count,
                 },
             });
         });
     }
 
-    async updateResource(input: AdminUpdateLessonResourceInput) {
-        return courseTransaction(this.prisma, async (transaction) => {
+    async updateResource(input: AdminUpdateLessonResourceInput, actor: AuthenticatedUser, tx?: Prisma.TransactionClient) {
+        return this.write(tx, async (transaction) => {
             const existing = await transaction.lessonResource.findUnique({
                 where: { id: input.id },
-                select: { id: true, lesson: { select: { section: { select: { courseId: true } } } } },
+                select: { id: true, type: true, url: true, mediaAssetId: true, lesson: { select: { section: { select: { courseId: true } } } } },
             });
             if (!existing) throw new NotFoundException('Lesson resource not found');
             await this.assertCourseEditable(existing.lesson.section.courseId, transaction);
-            if (input.url !== undefined) validateSafeUrl(input.url);
+            const type = input.type ?? existing.type;
+            const asset = (input.mediaAssetId && input.mediaAssetId !== existing.mediaAssetId) || (type !== 'LINK' && type !== existing.type)
+                ? await this.resourceAsset(transaction, type, input.mediaAssetId, actor.userId, existing.lesson.section.courseId) : null;
+            if (type === 'LINK' && (type !== existing.type || (input.url && input.url.trim() !== existing.url))) validateSafeUrl(input.url ?? existing.url);
+            else if (input.url && input.url.trim() !== existing.url) throw new BadRequestException('Replace resource files with a verified upload.');
             if (input.title === undefined && input.type === undefined && input.url === undefined &&
-                input.fileName === undefined && input.fileSize === undefined) {
+                input.fileName === undefined && input.fileSize === undefined && !asset) {
                 throw new BadRequestException('At least one resource field must be provided');
             }
             return transaction.lessonResource.update({
@@ -490,16 +539,17 @@ export class CurriculumService {
                 data: {
                     ...(input.title !== undefined ? { title: input.title.trim() } : {}),
                     ...(input.type !== undefined ? { type: input.type } : {}),
-                    ...(input.url !== undefined ? { url: input.url.trim() } : {}),
+                    ...(type === 'LINK' ? { mediaAssetId: null, ...(input.url !== undefined ? { url: input.url.trim() } : {}) } : {}),
                     ...(input.fileName !== undefined ? { fileName: input.fileName?.trim() || null } : {}),
                     ...(input.fileSize !== undefined ? { fileSize: input.fileSize } : {}),
+                    ...(asset ? { url: '', mediaAssetId: asset.id, fileName: asset.originalFileName, fileSize: asset.sizeBytes } : {}),
                 },
             });
         });
     }
 
-    async deleteResource(id: string) {
-        return courseTransaction(this.prisma, async (transaction) => {
+    async deleteResource(id: string, tx?: Prisma.TransactionClient) {
+        return this.write(tx, async (transaction) => {
             const resource = await transaction.lessonResource.findUnique({
                 where: { id },
                 select: { id: true, lessonId: true, position: true, lesson: { select: { section: { select: { courseId: true } } } } },
@@ -517,8 +567,8 @@ export class CurriculumService {
         });
     }
 
-    async reorderResources(input: AdminReorderLessonResourcesInput) {
-        return courseTransaction(this.prisma, async (transaction) => {
+    async reorderResources(input: AdminReorderLessonResourcesInput, tx?: Prisma.TransactionClient) {
+        return this.write(tx, async (transaction) => {
             const lesson = await transaction.courseLesson.findUnique({
                 where: { id: input.lessonId },
                 select: { section: { select: { courseId: true } } },
@@ -545,5 +595,79 @@ export class CurriculumService {
             ));
             return { success: true, message: 'Lesson resources reordered successfully' };
         });
+    }
+
+    async saveLesson(input: AdminSaveCourseLessonInput, actor: AuthenticatedUser) {
+        return courseTransaction(this.prisma, async (tx) => {
+            const { id, resources, sectionId, videoQualities, ...fields } = input;
+            const current = id ? await tx.courseLesson.findUnique({
+                where: { id },
+                select: { sectionId: true, resources: { orderBy: { position: 'asc' } } },
+            }) : null;
+            if (id && current?.sectionId !== sectionId) throw new NotFoundException('Course lesson not found in this section.');
+            const desiredIds = resources.flatMap((resource) => resource.id ? [resource.id] : []);
+            const existingIds = current?.resources.map((resource) => resource.id) ?? [];
+            if (new Set(desiredIds).size !== desiredIds.length || desiredIds.some((resourceId) => !existingIds.includes(resourceId))) {
+                throw new BadRequestException('The submitted resources must belong to this lesson.');
+            }
+
+            const lesson = id ? await this.updateLesson({ id, ...fields }, actor, tx)
+                : await this.createLesson({ sectionId, ...fields }, actor, tx);
+            const qualities = videoQualities
+                ? await this.saveVideoQualities(tx, lesson.id, lesson.videoAssetId, sectionId, actor.userId, videoQualities)
+                : null;
+            const removed = existingIds.filter((resourceId) => !desiredIds.includes(resourceId));
+            const existingResources = new Map(current?.resources.map((resource) => [resource.id, resource]));
+            const orderedResourceIds: string[] = [];
+            for (const { id: resourceId, ...resource } of resources) {
+                const previous = resourceId ? existingResources.get(resourceId) : undefined;
+                if (previous && previous.title === resource.title.trim() && previous.type === resource.type &&
+                    previous.url === resource.url.trim() && previous.mediaAssetId === (resource.mediaAssetId ?? null) &&
+                    resource.fileName === undefined && resource.fileSize === undefined) {
+                    orderedResourceIds.push(previous.id);
+                    continue;
+                }
+                const saved = resourceId ? await this.updateResource({ id: resourceId, ...resource }, actor, tx)
+                    : await this.createResource({ lessonId: lesson.id, ...resource }, actor, tx);
+                orderedResourceIds.push(saved.id);
+            }
+            if (removed.length) await tx.lessonResource.deleteMany({ where: { lessonId: lesson.id, id: { in: removed } } });
+            if (orderedResourceIds.some((resourceId, index) => resourceId !== existingIds[index])) {
+                await this.reorderResources({ lessonId: lesson.id, orderedResourceIds }, tx);
+            }
+            return {
+                ...lesson,
+                videoQualities: qualities,
+                resources: await tx.lessonResource.findMany({ where: { lessonId: lesson.id }, orderBy: { position: 'asc' } }),
+            };
+        }, input.resources.length > 100 ? 30000 : 15000);
+    }
+
+    private async saveVideoQualities(
+        tx: Prisma.TransactionClient,
+        lessonId: string,
+        originalId: string | null,
+        sectionId: string,
+        userId: string,
+        qualities: LessonVideoQualityInput[],
+    ) {
+        if (qualities.length && !originalId) throw new BadRequestException('Upload the original lesson video before adding quality options.');
+        const assetIds = new Set(qualities.map(({ assetId }) => assetId));
+        if (assetIds.size !== qualities.length || (originalId && assetIds.has(originalId)) ||
+            new Set(qualities.map(({ height }) => height)).size !== qualities.length) {
+            throw new BadRequestException('Use a separate upload for each video quality.');
+        }
+        const current = await tx.lessonVideoQuality.findMany({ where: { lessonId } });
+        const changes = qualities.filter(({ height, assetId }) => !current.some((item) => item.height === height && item.assetId === assetId));
+        if (changes.length) {
+            const { courseId } = await tx.courseSection.findUniqueOrThrow({ where: { id: sectionId }, select: { courseId: true } });
+            for (const { assetId } of changes) await privateAssetForAttachment(tx, assetId, userId, courseId, 'LESSON_VIDEO');
+        }
+        const removed = current.filter(({ height, assetId }) => !qualities.some((item) => item.height === height && item.assetId === assetId));
+        if (removed.length) await tx.lessonVideoQuality.deleteMany({ where: { lessonId, height: { in: removed.map(({ height }) => height) } } });
+        if (changes.length) {
+            await tx.lessonVideoQuality.createMany({ data: changes.map(({ height, assetId }) => ({ lessonId, height, assetId })) });
+        }
+        return qualities;
     }
 }

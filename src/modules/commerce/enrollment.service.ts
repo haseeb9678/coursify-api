@@ -5,7 +5,7 @@ import type { Prisma } from '../../generated/prisma/client.js';
 import { CommerceStore } from './commerce.store.js';
 import { grantsAccess } from './payment-policy.js';
 
-function learningCourseFilter(userId: string, courseId: string): Prisma.CourseWhereInput {
+export function learningCourseFilter(userId: string, courseId: string): Prisma.CourseWhereInput {
     return {
         id: courseId,
         status: { in: ['PUBLISHED', 'ARCHIVED'] },
@@ -64,15 +64,25 @@ export class EnrollmentService {
                         lessons: { orderBy: { position: 'asc' }, select: {
                             id: true, title: true, description: true, type: true,
                             content: true, videoUrl: true, documentUrl: true, durationSeconds: true,
+                            videoAssetId: true, documentAssetId: true,
                             resources: { orderBy: { position: 'asc' }, select: {
-                                id: true, title: true, type: true, url: true,
+                                id: true, title: true, type: true, url: true, mediaAssetId: true,
                             } },
                         } },
                     } },
                 },
             });
             if (!course) throw new ForbiddenException('Learning content requires active enrollment and available course material.');
-            return course;
+            return {
+                ...course,
+                sections: course.sections.map((section) => ({
+                    ...section,
+                    lessons: section.lessons.map(({ videoAssetId, documentAssetId, resources, ...lesson }) => ({
+                        ...lesson, hasManagedMedia: Boolean(videoAssetId || documentAssetId),
+                        resources: resources.map(({ mediaAssetId, ...resource }) => ({ ...resource, hasManagedMedia: Boolean(mediaAssetId) })),
+                    })),
+                })),
+            };
         });
     }
 

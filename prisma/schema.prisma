@@ -52,6 +52,7 @@ model User {
 
   enrollments Enrollment[]
   lessonComments LessonComment[]
+  uploadedMedia MediaAsset[]
   orders       PurchaseOrder[]
   checkoutRateLimit CheckoutRateLimit?
 
@@ -219,6 +220,8 @@ model CourseLesson {
   content         String    @default("") @db.Text
   videoUrl        String?
   documentUrl     String?
+  videoAssetId    String?   @db.Uuid
+  documentAssetId String?   @db.Uuid
   durationSeconds Int?
   position        Int
   isPreview       Boolean   @default(false)
@@ -228,10 +231,29 @@ model CourseLesson {
   section   CourseSection  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
   resources LessonResource[]
   comments  LessonComment[]
+  videoQualities LessonVideoQuality[]
+  videoAsset MediaAsset? @relation("LessonVideo", fields: [videoAssetId], references: [id], onDelete: Restrict)
+  documentAsset MediaAsset? @relation("LessonDocument", fields: [documentAssetId], references: [id], onDelete: Restrict)
 
   @@unique([sectionId, position])
   @@index([sectionId])
+  @@index([videoAssetId])
+  @@index([documentAssetId])
   @@map("course_lessons")
+}
+
+model LessonVideoQuality {
+  lessonId String @db.Uuid
+  height Int
+  assetId String @db.Uuid
+
+  lesson CourseLesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  asset MediaAsset @relation(fields: [assetId], references: [id], onDelete: Restrict)
+
+  @@id([lessonId, height])
+  @@unique([lessonId, assetId])
+  @@index([assetId])
+  @@map("lesson_video_qualities")
 }
 
 model LessonResource {
@@ -242,15 +264,91 @@ model LessonResource {
   url       String
   fileName  String?             @db.VarChar(255)
   fileSize  Int?
+  mediaAssetId String? @db.Uuid
   position  Int
   createdAt DateTime            @default(now())
   updatedAt DateTime            @updatedAt
 
   lesson CourseLesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  mediaAsset MediaAsset? @relation(fields: [mediaAssetId], references: [id], onDelete: Restrict)
 
   @@unique([lessonId, position])
   @@index([lessonId])
+  @@index([mediaAssetId])
   @@map("lesson_resources")
+}
+
+enum MediaPurpose {
+  COURSE_THUMBNAIL
+  COURSE_PROMOTIONAL_VIDEO
+  CATEGORY_IMAGE
+  USER_AVATAR
+  HERO_IMAGE
+  HERO_MOBILE_IMAGE
+  PROMOTIONAL_POPUP_IMAGE
+  LESSON_VIDEO
+  LESSON_DOCUMENT
+  LESSON_RESOURCE
+}
+
+enum MediaVisibility {
+  PUBLIC
+  PRIVATE
+}
+
+enum MediaStatus {
+  PENDING
+  READY
+  FAILED
+  ABORTED
+  DELETING
+  DELETED
+}
+
+model MediaAsset {
+  id String @id @default(uuid()) @db.Uuid
+  requestId String @db.Uuid
+  uploadedById String? @db.Uuid
+  courseScopeId String? @db.Uuid
+  bucket String
+  objectKey String
+  stagingBucket String
+  publicUrl String? @unique
+  originalFileName String @db.VarChar(255)
+  mimeType String
+  extension String
+  sizeBytes Int
+  purpose MediaPurpose
+  visibility MediaVisibility
+  status MediaStatus @default(PENDING)
+  multipartId String?
+  partSize Int?
+  expiresAt DateTime
+  stagingPending Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  uploadedAt DateTime?
+  deletedAt DateTime?
+
+  uploadedBy User? @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+  lessonVideos CourseLesson[] @relation("LessonVideo")
+  lessonVideoQualities LessonVideoQuality[]
+  lessonDocuments CourseLesson[] @relation("LessonDocument")
+  lessonResources LessonResource[]
+
+  @@unique([uploadedById, requestId])
+  @@unique([bucket, objectKey])
+  @@index([status, expiresAt])
+  @@index([createdAt, id])
+  @@map("media_assets")
+}
+
+model MediaRequestLimit {
+  key String @id
+  windowStart DateTime
+  requests Int
+
+  @@map("media_request_limits")
 }
 
 model LessonComment {
