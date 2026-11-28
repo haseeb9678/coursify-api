@@ -63,6 +63,8 @@ export class AdminCourse {
     @Field(() => Boolean, { nullable: true }) canDelete?: boolean;
     @Field(() => Int) sectionCount!: number;
     @Field(() => Int) lessonCount!: number;
+    @Field(() => Int, { nullable: true }) enrollmentCount?: number;
+    @Field(() => Int, { nullable: true }) durationSeconds?: number;
     @Field(() => GraphQLISODateTime, { nullable: true }) submittedAt!: Date | null;
     @Field(() => GraphQLISODateTime, { nullable: true }) approvedAt!: Date | null;
     @Field(() => GraphQLISODateTime, { nullable: true }) publishedAt!: Date | null;

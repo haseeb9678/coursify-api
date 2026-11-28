@@ -12,7 +12,7 @@ import type { AuthenticatedUser } from '../auth/types/authenticated-user.type.js
 import { canEditCourse } from '../courses/course-lifecycle.js';
 import { checkUpload, matchesFileSignature, mediaPolicy } from './media-policy.js';
 import { R2StorageProvider } from './r2-storage.provider.js';
-import type { AdminMediaFilter, CompleteMediaPart, CreateMediaUploadInput } from './storage.models.js';
+import type { AdminMediaFilter, CompleteMediaPart, CreateMediaUploadInput, MediaSelectionField, MediaSelectionFilter } from './storage.models.js';
 
 const gracePeriod = 7 * 24 * 3600 * 1000;
 const stagingGrace = 60 * 60 * 1000;
@@ -48,7 +48,8 @@ export class StorageService {
     options(purpose: MediaPurpose) {
         const config = this.provider.config;
         const { limit, files } = mediaPolicy(purpose, config);
-        return { enabled: config.enabled, maxBytes: limit, extensions: Object.keys(files) };
+        return { enabled: config.enabled, maxBytes: limit, extensions: Object.keys(files),
+            formats: Object.entries(files).map(([extension, mimeType]) => ({ extension, mimeType })) };
     }
 
     async rateLimit(key: string, limit: number) {
@@ -65,26 +66,76 @@ export class StorageService {
         if (!rows.length) throw new HttpException('Too many media requests. Try again in a minute.', HttpStatus.TOO_MANY_REQUESTS);
     }
 
-    private async authorizeUpload(user: AuthenticatedUser, input: CreateMediaUploadInput) {
+    private async authorizeField(user: AuthenticatedUser, input: Pick<CreateMediaUploadInput, 'purpose' | 'courseId'>) {
         if (input.purpose === 'USER_AVATAR') {
             if (input.courseId) throw new BadRequestException('An avatar does not belong to a course.');
             return;
         }
-        // Curriculum and the existing content management mutations are admin-only.
-        if (user.role !== 'ADMIN') throw new ForbiddenException('You cannot upload media for this field.');
+        const courseMedia = input.purpose.startsWith('COURSE_') || input.purpose.startsWith('LESSON_');
+        if (user.role !== 'ADMIN' && (user.role !== 'INSTRUCTOR' || !courseMedia)) {
+            throw new ForbiddenException('You cannot upload media for this field.');
+        }
         if (input.purpose.startsWith('LESSON_') && !input.courseId) {
             throw new BadRequestException('Select the course for this upload.');
         }
         if (input.courseId) {
-            const course = await this.prisma.course.findUnique({ where: { id: input.courseId }, select: { status: true } });
+            const course = await this.prisma.course.findUnique({
+                where: { id: input.courseId, ...(user.role === 'INSTRUCTOR' ? { instructorId: user.userId } : {}) },
+                select: { status: true },
+            });
             if (!course) throw new NotFoundException('Course not found.');
             if (!canEditCourse(course.status)) throw new ConflictException('This course is locked for editing.');
         }
     }
 
+    private async selectionWhere(user: AuthenticatedUser, field: MediaSelectionField): Promise<Prisma.MediaAssetWhereInput> {
+        await this.authorizeField(user, field);
+        const policy = mediaPolicy(field.purpose, this.provider.config);
+        const isPrivate = policy.visibility === 'PRIVATE';
+        const ownerOnly = isPrivate || field.purpose === 'USER_AVATAR' || user.role !== 'ADMIN';
+        return {
+            purpose: field.purpose,
+            status: 'READY',
+            visibility: policy.visibility,
+            sizeBytes: { gt: 0, lte: policy.limit },
+            uploadedById: ownerOnly ? user.userId : undefined,
+            publicUrl: isPrivate ? null : { not: null },
+            AND: [
+                { OR: Object.entries(policy.files).map(([extension, mimeType]) => ({ extension, mimeType })) },
+                isPrivate ? { courseScopeId: field.courseId }
+                    : { OR: [{ courseScopeId: null }, ...(field.courseId ? [{ courseScopeId: field.courseId }] : [])] },
+            ],
+        };
+    }
+
+    async selection(user: AuthenticatedUser, pagination: PaginationInput, filter: MediaSelectionFilter) {
+        const scope = await this.selectionWhere(user, filter);
+        await this.rateLimit(`selection:${user.userId}`, 90);
+        const { page, limit, skip } = getPaginationWindow(pagination);
+        const search = filter.search?.trim();
+        const where: Prisma.MediaAssetWhereInput = {
+            ...scope,
+            extension: filter.extension,
+            originalFileName: search ? { contains: search, mode: 'insensitive' } : undefined,
+        };
+        const [items, total] = await this.prisma.$transaction([
+            this.prisma.mediaAsset.findMany({ where, skip, take: limit, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] }),
+            this.prisma.mediaAsset.count({ where }),
+        ]);
+        return { items: items.map(visibleAsset), meta: createPaginationMeta(page, limit, total) };
+    }
+
+    async selectedAsset(user: AuthenticatedUser, field: MediaSelectionField, id: string) {
+        const where = await this.selectionWhere(user, field);
+        await this.rateLimit(`selection-read:${user.userId}`, 90);
+        const asset = await this.prisma.mediaAsset.findFirst({ where: { ...where, id } });
+        if (!asset) throw new NotFoundException('This file is unavailable for the selected field.');
+        return asset;
+    }
+
     async create(user: AuthenticatedUser, input: CreateMediaUploadInput) {
         this.provider.requireClient();
-        await this.authorizeUpload(user, input);
+        await this.authorizeField(user, input);
         await this.rateLimit(`write:${user.userId}`, 30);
         const config = this.provider.config;
         const file = checkUpload(input.purpose, input.fileName, input.mimeType, input.sizeBytes, config);
@@ -220,7 +271,7 @@ export class StorageService {
         ` : [];
     }
 
-    async list(pagination: PaginationInput, filter?: AdminMediaFilter, oldestFirst = false) {
+    async list(pagination: PaginationInput, filter?: AdminMediaFilter, oldestFirst = false, ownerId?: string) {
         const { page, limit, skip } = getPaginationWindow(pagination);
         const where: Prisma.MediaAssetWhereInput = {
             status: filter?.status ?? { not: 'DELETED' }, purpose: filter?.purpose, visibility: filter?.visibility,
@@ -231,14 +282,22 @@ export class StorageService {
         };
         const direction = oldestFirst ? 'asc' : 'desc';
         return this.prisma.$transaction(async (tx) => {
+            if (ownerId) {
+                const courses = await tx.course.findMany({ where: { instructorId: ownerId }, select: { id: true } });
+                where.uploadedById = ownerId;
+                where.OR = [{ courseScopeId: null }, { courseScopeId: { in: courses.map(({ id }) => id) } }];
+                where.AND = [{ purpose: { in: ['COURSE_THUMBNAIL', 'COURSE_PROMOTIONAL_VIDEO', 'LESSON_VIDEO', 'LESSON_DOCUMENT', 'LESSON_RESOURCE'] } }];
+            }
             const assets = await tx.mediaAsset.findMany({ where, skip, take: limit, orderBy: [{ createdAt: direction }, { id: direction }],
                 include: { uploadedBy: { select: { name: true } } } });
             const refs = await this.references(tx, assets.map(({ id }) => id));
             const total = await tx.mediaAsset.count({ where });
             return {
-                items: assets.map((asset) => ({
-                    ...visibleAsset(asset), uploader: asset.uploadedBy?.name ?? null, attachments: refs.filter((ref) => ref.assetId === asset.id),
-                })),
+                items: assets.map((asset) => {
+                    const attachments = refs.filter((ref) => ref.assetId === asset.id);
+                    return { ...visibleAsset(asset), uploader: asset.uploadedBy?.name ?? null,
+                        inUse: attachments.length > 0, attachments: ownerId ? [] : attachments };
+                }),
                 meta: createPaginationMeta(page, limit, total),
             };
         });
@@ -271,10 +330,24 @@ export class StorageService {
         };
     }
 
-    async deleteUnused(id: string, olderThan?: Date) {
+    async assertInstructorAsset(
+        database: Prisma.TransactionClient, asset: MediaAsset | null, ownerId: string,
+    ): Promise<MediaAsset> {
+        if (!asset || asset.uploadedById !== ownerId ||
+            (!asset.purpose.startsWith('COURSE_') && !asset.purpose.startsWith('LESSON_'))) {
+            throw new NotFoundException('Media not found.');
+        }
+        if (asset.courseScopeId && !await database.course.findUnique({
+            where: { id: asset.courseScopeId, instructorId: ownerId }, select: { id: true },
+        })) throw new NotFoundException('Media not found.');
+        return asset;
+    }
+
+    async deleteUnused(id: string, olderThan?: Date, ownerId?: string) {
         this.provider.requireClient();
         const staged = await this.prisma.$transaction(async (tx) => {
             const asset = await lockMediaAsset(tx, id);
+            if (ownerId) await this.assertInstructorAsset(tx, asset, ownerId);
             if (!asset) throw new NotFoundException('Media not found.');
             if (asset.status === 'DELETED') return null;
             if (!['READY', 'DELETING'].includes(asset.status)) throw new ConflictException('Media must finish uploading before deletion.');

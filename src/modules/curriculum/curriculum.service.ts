@@ -16,6 +16,7 @@ import { mapPrismaError } from '../../common/utils/prisma-error.util.js';
 import { canEditCourse, courseTransaction } from '../courses/course-lifecycle.js';
 import type { AuthenticatedUser } from '../auth/types/authenticated-user.type.js';
 import { privateAssetForAttachment } from '../storage/storage.service.js';
+import type { InstructorImportModuleInput } from './dto/curriculum.inputs.js';
 import {
     AdminCreateCourseLessonInput,
     AdminCreateCourseSectionInput,
@@ -54,9 +55,12 @@ export class CurriculumService {
         return transaction ? work(transaction) : courseTransaction(this.prisma, work);
     }
 
-    private async assertCourseEditable(courseId: string, transaction: Prisma.TransactionClient) {
+    private async assertCourseEditable(courseId: string, transaction: Prisma.TransactionClient, ownerId?: string) {
         // Coordinate curriculum writes with lifecycle updates to this course row.
-        const [course] = await transaction.$queryRaw<{ status: CourseStatus }[]>`
+        const [course] = ownerId ? await transaction.$queryRaw<{ status: CourseStatus }[]>`
+            SELECT "status"::text AS status FROM "courses"
+            WHERE "id" = ${courseId}::uuid AND "instructorId" = ${ownerId}::uuid FOR UPDATE
+        ` : await transaction.$queryRaw<{ status: CourseStatus }[]>`
             SELECT "status"::text AS status FROM "courses" WHERE "id" = ${courseId}::uuid FOR UPDATE
         `;
         if (!course) throw new NotFoundException('Course not found');
@@ -65,9 +69,9 @@ export class CurriculumService {
         }
     }
 
-    async getCurriculum(courseId: string) {
+    async getCurriculum(courseId: string, ownerId?: string) {
         const course = await this.prisma.course.findUnique({
-            where: { id: courseId },
+            where: { id: courseId, ...(ownerId ? { instructorId: ownerId } : {}) },
             select: {
                 id: true,
                 sections: {
@@ -162,9 +166,9 @@ export class CurriculumService {
         return lesson;
     }
 
-    async createSection(input: AdminCreateCourseSectionInput, actor: AuthenticatedUser) {
-        return courseTransaction(this.prisma, async (transaction) => {
-            await this.assertCourseEditable(input.courseId, transaction);
+    async createSection(input: AdminCreateCourseSectionInput, actor: AuthenticatedUser, tx?: Prisma.TransactionClient) {
+        return this.write(tx, async (transaction) => {
+            await this.assertCourseEditable(input.courseId, transaction, actor.role === 'INSTRUCTOR' ? actor.userId : undefined);
             const count = await transaction.courseSection.count({ where: { courseId: input.courseId } });
             const section = await transaction.courseSection.create({
                 data: {
@@ -187,18 +191,18 @@ export class CurriculumService {
                     },
                 },
             });
-            this.logger.log(`Admin ${actor.userId} created section ${section.id}`);
+            this.logger.log(`${actor.role} ${actor.userId} created section ${section.id}`);
             return section;
         });
     }
 
-    async updateSection(input: AdminUpdateCourseSectionInput) {
+    async updateSection(input: AdminUpdateCourseSectionInput, ownerId?: string) {
         return courseTransaction(this.prisma, async (transaction) => {
             const existing = await transaction.courseSection.findUnique({
                 where: { id: input.id }, select: { id: true, courseId: true },
             });
             if (!existing) throw new NotFoundException('Course section not found');
-            await this.assertCourseEditable(existing.courseId, transaction);
+            await this.assertCourseEditable(existing.courseId, transaction, ownerId);
             if (input.title === undefined && input.description === undefined) {
                 throw new BadRequestException('At least one section field must be provided');
             }
@@ -225,13 +229,13 @@ export class CurriculumService {
         });
     }
 
-    async deleteSection(id: string) {
+    async deleteSection(id: string, ownerId?: string) {
         return courseTransaction(this.prisma, async (transaction) => {
             const section = await transaction.courseSection.findUnique({
                 where: { id }, select: { id: true, courseId: true, position: true, _count: { select: { lessons: true } } },
             });
             if (!section) throw new NotFoundException('Course section not found');
-            await this.assertCourseEditable(section.courseId, transaction);
+            await this.assertCourseEditable(section.courseId, transaction, ownerId);
             if (section._count.lessons > 0) {
                 throw new ConflictException('Section cannot be deleted while it contains lessons');
             }
@@ -248,9 +252,9 @@ export class CurriculumService {
         });
     }
 
-    async reorderSections(input: AdminReorderCourseSectionsInput) {
+    async reorderSections(input: AdminReorderCourseSectionsInput, ownerId?: string) {
         return courseTransaction(this.prisma, async (transaction) => {
-            await this.assertCourseEditable(input.courseId, transaction);
+            await this.assertCourseEditable(input.courseId, transaction, ownerId);
             const sections = await transaction.courseSection.findMany({
                 where: { courseId: input.courseId }, select: { id: true },
             });
@@ -277,16 +281,22 @@ export class CurriculumService {
     }
 
     async createLesson(input: AdminCreateCourseLessonInput, actor: AuthenticatedUser, tx?: Prisma.TransactionClient) {
+        return this.insertLesson(input, actor, tx);
+    }
+
+    private async insertLesson(input: AdminCreateCourseLessonInput, actor: AuthenticatedUser, tx?: Prisma.TransactionClient,
+        draftPlaceholder = false) {
         return this.write(tx, async (transaction) => {
             const section = await transaction.courseSection.findUnique({
                 where: { id: input.sectionId },
                 select: { id: true, courseId: true },
             });
             if (!section) throw new NotFoundException('Course section not found');
-            await this.assertCourseEditable(section.courseId, transaction);
+            await this.assertCourseEditable(section.courseId, transaction, actor.role === 'INSTRUCTOR' ? actor.userId : undefined);
             if (input.videoUrl || input.documentUrl) throw new BadRequestException('Upload new lesson files directly from your device.');
             this.validateLesson(input.type, input.content, input.durationSeconds);
-            const media = await this.lessonAsset(transaction, input.type, input.mediaAssetId, actor.userId, section.courseId);
+            const media = draftPlaceholder
+                ? null : await this.lessonAsset(transaction, input.type, input.mediaAssetId, actor.userId, section.courseId);
             const count = await transaction.courseLesson.count({ where: { sectionId: input.sectionId } });
             const lesson = await transaction.courseLesson.create({
                 data: {
@@ -305,9 +315,24 @@ export class CurriculumService {
                     resources: { orderBy: { position: 'asc' } },
                 },
             });
-            this.logger.log(`Admin ${actor.userId} created lesson ${lesson.id}`);
+            this.logger.log(`${actor.role} ${actor.userId} created lesson ${lesson.id}`);
             return lesson;
         });
+    }
+
+    async importDraftCurriculum(tx: Prisma.TransactionClient, courseId: string, modules: InstructorImportModuleInput[], actor: AuthenticatedUser) {
+        const lessons = modules.flatMap((module) => module.lessons);
+        if (lessons.length > 100 || lessons.reduce((total, lesson) => total + lesson.resources.length, 0) > 250) {
+            throw new BadRequestException('Import up to 100 lessons and 250 linked resources per course.');
+        }
+        for (const { lessons: entries, ...module } of modules) {
+            const section = await this.createSection({ ...module, courseId }, actor, tx);
+            for (const { resources, ...entry } of entries) {
+                // Private media can only attach to the course it was uploaded for.
+                const lesson = await this.insertLesson({ ...entry, sectionId: section.id }, actor, tx, true);
+                for (const { title, type, url } of resources) await this.createResource({ title, type, url, lessonId: lesson.id }, actor, tx);
+            }
+        }
     }
 
     private validateLesson(type: LessonType, content?: string, duration?: number | null) {
@@ -334,7 +359,7 @@ export class CurriculumService {
                     videoUrl: true, documentUrl: true, videoAssetId: true, documentAssetId: true, durationSeconds: true },
             });
             if (!existing) throw new NotFoundException('Course lesson not found');
-            await this.assertCourseEditable(existing.section.courseId, transaction);
+            await this.assertCourseEditable(existing.section.courseId, transaction, actor.role === 'INSTRUCTOR' ? actor.userId : undefined);
             const type = input.type ?? existing.type;
             const content = input.content !== undefined ? input.content : existing.content;
             const videoUrl = type === 'VIDEO' && type === existing.type ? existing.videoUrl : null;
@@ -383,14 +408,14 @@ export class CurriculumService {
         });
     }
 
-    async deleteLesson(id: string) {
+    async deleteLesson(id: string, ownerId?: string) {
         return courseTransaction(this.prisma, async (transaction) => {
             const lesson = await transaction.courseLesson.findUnique({
                 where: { id },
                 select: { id: true, sectionId: true, position: true, section: { select: { courseId: true } } },
             });
             if (!lesson) throw new NotFoundException('Course lesson not found');
-            await this.assertCourseEditable(lesson.section.courseId, transaction);
+            await this.assertCourseEditable(lesson.section.courseId, transaction, ownerId);
             await transaction.courseLesson.delete({ where: { id } });
             const remaining = await transaction.courseLesson.findMany({
                 where: { sectionId: lesson.sectionId },
@@ -404,13 +429,13 @@ export class CurriculumService {
         });
     }
 
-    async reorderLessons(input: AdminReorderCourseLessonsInput) {
+    async reorderLessons(input: AdminReorderCourseLessonsInput, ownerId?: string) {
         return courseTransaction(this.prisma, async (transaction) => {
             const section = await transaction.courseSection.findUnique({
                 where: { id: input.sectionId }, select: { courseId: true },
             });
             if (!section) throw new NotFoundException('Course section not found');
-            await this.assertCourseEditable(section.courseId, transaction);
+            await this.assertCourseEditable(section.courseId, transaction, ownerId);
             const lessons = await transaction.courseLesson.findMany({
                 where: { sectionId: input.sectionId }, select: { id: true },
             });
@@ -433,13 +458,14 @@ export class CurriculumService {
         });
     }
 
-    async moveLesson(input: AdminMoveCourseLessonInput) {
+    async moveLesson(input: AdminMoveCourseLessonInput, ownerId?: string) {
         return courseTransaction(this.prisma, async (transaction) => {
             const lesson = await transaction.courseLesson.findUnique({
                 where: { id: input.lessonId },
                 select: { id: true, sectionId: true, position: true, section: { select: { courseId: true } } },
             });
             if (!lesson) throw new NotFoundException('Course lesson not found');
+            await this.assertCourseEditable(lesson.section.courseId, transaction, ownerId);
             const destination = await transaction.courseSection.findUnique({
                 where: { id: input.destinationSectionId },
                 select: { id: true, courseId: true },
@@ -448,7 +474,6 @@ export class CurriculumService {
             if (destination.courseId !== lesson.section.courseId) {
                 throw new BadRequestException('Lessons cannot be moved across courses');
             }
-            await this.assertCourseEditable(lesson.section.courseId, transaction);
             if (lesson.sectionId === destination.id) throw new BadRequestException('Lesson is already in this section');
             const destinationCount = await transaction.courseLesson.count({ where: { sectionId: destination.id } });
             await transaction.courseLesson.update({
@@ -498,7 +523,7 @@ export class CurriculumService {
                 select: { id: true, section: { select: { courseId: true } } },
             });
             if (!lesson) throw new NotFoundException('Course lesson not found');
-            await this.assertCourseEditable(lesson.section.courseId, transaction);
+            await this.assertCourseEditable(lesson.section.courseId, transaction, actor.role === 'INSTRUCTOR' ? actor.userId : undefined);
             const asset = await this.resourceAsset(transaction, input.type, input.mediaAssetId, actor.userId, lesson.section.courseId);
             if (!asset) validateSafeUrl(input.url);
             const count = await transaction.lessonResource.count({ where: { lessonId: input.lessonId } });
@@ -524,7 +549,7 @@ export class CurriculumService {
                 select: { id: true, type: true, url: true, mediaAssetId: true, lesson: { select: { section: { select: { courseId: true } } } } },
             });
             if (!existing) throw new NotFoundException('Lesson resource not found');
-            await this.assertCourseEditable(existing.lesson.section.courseId, transaction);
+            await this.assertCourseEditable(existing.lesson.section.courseId, transaction, actor.role === 'INSTRUCTOR' ? actor.userId : undefined);
             const type = input.type ?? existing.type;
             const asset = (input.mediaAssetId && input.mediaAssetId !== existing.mediaAssetId) || (type !== 'LINK' && type !== existing.type)
                 ? await this.resourceAsset(transaction, type, input.mediaAssetId, actor.userId, existing.lesson.section.courseId) : null;
@@ -548,14 +573,14 @@ export class CurriculumService {
         });
     }
 
-    async deleteResource(id: string, tx?: Prisma.TransactionClient) {
+    async deleteResource(id: string, tx?: Prisma.TransactionClient, ownerId?: string) {
         return this.write(tx, async (transaction) => {
             const resource = await transaction.lessonResource.findUnique({
                 where: { id },
                 select: { id: true, lessonId: true, position: true, lesson: { select: { section: { select: { courseId: true } } } } },
             });
             if (!resource) throw new NotFoundException('Lesson resource not found');
-            await this.assertCourseEditable(resource.lesson.section.courseId, transaction);
+            await this.assertCourseEditable(resource.lesson.section.courseId, transaction, ownerId);
             await transaction.lessonResource.delete({ where: { id } });
             const remaining = await transaction.lessonResource.findMany({
                 where: { lessonId: resource.lessonId }, orderBy: { position: 'asc' }, select: { id: true },
@@ -567,14 +592,14 @@ export class CurriculumService {
         });
     }
 
-    async reorderResources(input: AdminReorderLessonResourcesInput, tx?: Prisma.TransactionClient) {
+    async reorderResources(input: AdminReorderLessonResourcesInput, tx?: Prisma.TransactionClient, ownerId?: string) {
         return this.write(tx, async (transaction) => {
             const lesson = await transaction.courseLesson.findUnique({
                 where: { id: input.lessonId },
                 select: { section: { select: { courseId: true } } },
             });
             if (!lesson) throw new NotFoundException('Course lesson not found');
-            await this.assertCourseEditable(lesson.section.courseId, transaction);
+            await this.assertCourseEditable(lesson.section.courseId, transaction, ownerId);
             const resources = await transaction.lessonResource.findMany({
                 where: { lessonId: input.lessonId }, select: { id: true },
             });
@@ -600,6 +625,11 @@ export class CurriculumService {
     async saveLesson(input: AdminSaveCourseLessonInput, actor: AuthenticatedUser) {
         return courseTransaction(this.prisma, async (tx) => {
             const { id, resources, sectionId, videoQualities, ...fields } = input;
+            if (actor.role === 'INSTRUCTOR') {
+                const section = await tx.courseSection.findUnique({ where: { id: sectionId }, select: { courseId: true } });
+                if (!section) throw new NotFoundException('Course section not found');
+                await this.assertCourseEditable(section.courseId, tx, actor.userId);
+            }
             const current = id ? await tx.courseLesson.findUnique({
                 where: { id },
                 select: { sectionId: true, resources: { orderBy: { position: 'asc' } } },

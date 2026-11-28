@@ -12,7 +12,8 @@ import { MediaPurpose } from '../../generated/prisma/enums.js';
 import type { AuthenticatedUser } from '../auth/types/authenticated-user.type.js';
 import {
     AdminMediaFilter, AdminMediaPage, CompleteMediaPart, CreateMediaUploadInput, MediaReadAccess,
-    MediaStorageStats, MediaUploadAuthorization, MediaUploadOptions, SignedMediaPart, SignMediaPartsInput, StoredMediaAsset,
+    MediaSelectionField, MediaSelectionFilter, MediaSelectionPage, MediaStorageStats, MediaUploadAuthorization,
+    MediaUploadOptions, SignedMediaPart, SignMediaPartsInput, StoredMediaAsset,
 } from './storage.models.js';
 import { StorageAccessService } from './storage-access.service.js';
 import { StorageService } from './storage.service.js';
@@ -42,6 +43,20 @@ export class StorageResolver {
     @UseGuards(GqlAuthGuard)
     mediaUploadOptions(@Args('purpose', { type: () => MediaPurpose }) purpose: MediaPurpose) {
         return this.storage.options(purpose);
+    }
+
+    @Query(() => MediaSelectionPage)
+    @UseGuards(GqlAuthGuard)
+    mediaSelection(@CurrentUser() user: AuthenticatedUser, @Args('pagination') pagination: PaginationInput,
+        @Args('filter') filter: MediaSelectionFilter) {
+        return this.storage.selection(user, pagination, filter);
+    }
+
+    @Query(() => MediaReadAccess)
+    @UseGuards(GqlAuthGuard)
+    mediaSelectionPreview(@CurrentUser() user: AuthenticatedUser,
+        @Args('field') field: MediaSelectionField, @Args('id', { type: () => ID }, ParseUUIDPipe) id: string) {
+        return this.access.selectionPreview(user, field, id);
     }
 
     @Mutation(() => MediaUploadAuthorization)

@@ -6,5 +6,6 @@ import { StorageService } from './storage.service.js';
 
 @Module({
     providers: [R2StorageProvider, StorageAccessService, StorageService, StorageResolver, AdminStorageResolver, StorageOriginGuard],
+    exports: [StorageService, StorageAccessService],
 })
 export class StorageModule {}

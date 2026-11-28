@@ -5,6 +5,7 @@ import type { AuthenticatedUser } from '../auth/types/authenticated-user.type.js
 import { learningCourseFilter } from '../commerce/enrollment.service.js';
 import { lockMediaAsset, StorageService } from './storage.service.js';
 import { R2StorageProvider } from './r2-storage.provider.js';
+import type { MediaSelectionField } from './storage.models.js';
 
 const videoSelect = {
     videoAsset: true,
@@ -36,6 +37,7 @@ export class StorageAccessService {
     }
 
     private lessonScope(user: AuthenticatedUser, courseId: string): Prisma.CourseLessonWhereInput {
+        if (user.role === 'INSTRUCTOR') return { section: { course: { id: courseId, instructorId: user.userId } } };
         if (user.role !== 'ADMIN' && user.role !== 'STUDENT') {
             throw new ForbiddenException('This account does not have access to the requested learning media.');
         }
@@ -98,6 +100,20 @@ export class StorageAccessService {
         const asset = await this.prisma.mediaAsset.findUnique({ where: { id } });
         if (asset?.status === 'READY' && asset.publicUrl) return { url: asset.publicUrl, expiresAt: null };
         return this.signed(asset);
+    }
+
+    async instructorRead(userId: string, id: string) {
+        await this.storage.rateLimit(`read:${userId}`, 90);
+        const asset = await this.storage.assertInstructorAsset(
+            this.prisma, await this.prisma.mediaAsset.findUnique({ where: { id } }), userId,
+        );
+        if (asset.status === 'READY' && asset.publicUrl) return { url: asset.publicUrl, expiresAt: null };
+        return this.signed(asset);
+    }
+
+    async selectionPreview(user: AuthenticatedUser, field: MediaSelectionField, id: string) {
+        const asset = await this.storage.selectedAsset(user, field, id);
+        return asset.publicUrl ? { url: asset.publicUrl, expiresAt: null } : this.signed(asset);
     }
 
     async updateAvatar(userId: string, value?: string | null, assetId?: string | null) {

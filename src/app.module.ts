@@ -47,6 +47,7 @@ import { CommerceModule } from './modules/commerce/commerce.module.js';
 import { WebsiteModule } from './modules/website/website.module.js';
 import { CourseReviewsModule } from './modules/course-reviews/course-reviews.module.js';
 import { StorageModule } from './modules/storage/storage.module.js';
+import { InstructorModule } from './modules/instructor/instructor.module.js';
 
 @Module({
   imports: [
@@ -125,6 +126,7 @@ import { StorageModule } from './modules/storage/storage.module.js';
     WebsiteModule,
     CommerceModule,
     StorageModule,
+    InstructorModule,
   ],
 
   controllers: [

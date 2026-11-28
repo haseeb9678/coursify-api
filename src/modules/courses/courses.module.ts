@@ -10,5 +10,6 @@ import { CoursesService } from './courses.service.js';
 @Module({
     imports: [AuthorizationModule, AuthModule, DatabaseModule],
     providers: [CoursesService, AdminCoursesResolver, PublicCoursesResolver],
+    exports: [CoursesService],
 })
 export class CoursesModule {}

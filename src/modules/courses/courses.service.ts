@@ -33,6 +33,7 @@ import {
 import { assertCourseStatus, assertCourseTransition, canDeleteCourse, canEditCourse, courseTransaction } from './course-lifecycle.js';
 import { AdminCourseSortField } from './enums/course.enums.js';
 import { lessonReadinessErrors, lessonReadinessSelect, type LessonReadiness } from './lesson-readiness.js';
+import { lockMediaAsset } from '../storage/storage.service.js';
 
 function normalizeSlug(value: string): string {
     return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim()
@@ -99,6 +100,7 @@ export class CoursesService {
             canDelete: canDeleteCourse(course.status, course._count.reviews) && !course._count.enrollments && !course._count.orders,
             sectionCount: course.sections.length,
             lessonCount: course.sections.reduce((total, section) => total + section._count.lessons, 0),
+            enrollmentCount: course._count.enrollments,
             submittedAt: course.submittedAt,
             approvedAt: course.approvedAt,
             publishedAt: course.publishedAt,
@@ -129,7 +131,7 @@ export class CoursesService {
         _count: { select: { reviews: true, enrollments: true, orders: true } },
     } as const satisfies Prisma.CourseSelect;
 
-    async findCourses(pagination: PaginationInput, filter?: AdminCoursesFilterInput, sort?: AdminCourseSortInput) {
+    async findCourses(pagination: PaginationInput, filter?: AdminCoursesFilterInput, sort?: AdminCourseSortInput, ownerId?: string) {
         const window = getPaginationWindow(pagination);
         const search = filter?.search?.trim();
         const where: Prisma.CourseWhereInput = {};
@@ -141,7 +143,8 @@ export class CoursesService {
             ];
         }
         if (filter?.categoryId) where.categoryId = filter.categoryId;
-        if (filter?.instructorId) where.instructorId = filter.instructorId;
+        const instructorId = ownerId ?? filter?.instructorId;
+        if (instructorId) where.instructorId = instructorId;
         if (filter?.status) where.status = filter.status;
         if (filter?.level) where.level = filter.level;
         if (filter?.language) where.language = { equals: filter.language, mode: 'insensitive' };
@@ -174,16 +177,31 @@ export class CoursesService {
             }),
             this.prisma.course.count({ where }),
         ]);
+        const durations = ownerId ? await this.instructorDurations(ownerId, courses.map(({ id }) => id)) : undefined;
         return {
-            items: await Promise.all(courses.map((course) => this.mapCourse(course))),
+            items: await Promise.all(courses.map(async (course) => ({
+                ...await this.mapCourse(course), durationSeconds: durations?.get(course.id),
+            }))),
             meta: createPaginationMeta(window.page, window.limit, total),
         };
     }
 
-    async findCourse(id: string) {
-        const course = await this.prisma.course.findUnique({ where: { id }, select: this.courseSelect });
+    async findCourse(id: string, ownerId?: string) {
+        const course = await this.prisma.course.findUnique({ where: { id, ...(ownerId ? { instructorId: ownerId } : {}) }, select: this.courseSelect });
         if (!course) throw new NotFoundException('Course not found');
-        return this.mapCourse(course);
+        const duration = ownerId ? await this.instructorDurations(ownerId, [id]) : undefined;
+        return { ...await this.mapCourse(course), durationSeconds: duration?.get(id) };
+    }
+
+    private async instructorDurations(ownerId: string, courseIds: string[]) {
+        if (!courseIds.length) return new Map<string, number>();
+        const rows = await this.prisma.$queryRaw<{ id: string; seconds: number }[]>`
+            SELECT c.id, COALESCE(SUM(l."durationSeconds"), 0)::int AS seconds
+            FROM courses c LEFT JOIN course_sections s ON s."courseId" = c.id
+            LEFT JOIN course_lessons l ON l."sectionId" = s.id
+            WHERE c."instructorId" = ${ownerId}::uuid AND c.id IN (${Prisma.join(courseIds.map((id) => Prisma.sql`${id}::uuid`))})
+            GROUP BY c.id`;
+        return new Map(rows.map(({ id, seconds }) => [id, seconds]));
     }
 
     async getStats() {
@@ -220,12 +238,14 @@ export class CoursesService {
         });
     }
 
-    async getCategoryOptions(search?: string) {
+    async getCategoryOptions(search?: string, includeIdentifiers = false) {
         const trimmed = search?.trim();
         return this.prisma.category.findMany({
             where: {
                 status: CategoryStatus.ACTIVE,
-                ...(trimmed ? { name: { contains: trimmed, mode: 'insensitive' } } : {}),
+                ...(trimmed ? (includeIdentifiers ? {
+                    OR: [{ name: { contains: trimmed, mode: 'insensitive' } }, { slug: trimmed }, ...(isUUID(trimmed) ? [{ id: trimmed }] : [])],
+                } : { name: { contains: trimmed, mode: 'insensitive' } }) : {}),
             },
             select: { id: true, name: true, slug: true },
             orderBy: [{ name: 'asc' }, { id: 'asc' }],
@@ -246,13 +266,19 @@ export class CoursesService {
         }
     }
 
-    async createCourse(input: AdminCreateCourseInput, actor: AuthenticatedUser) {
+    async createCourse(input: AdminCreateCourseInput, actor: AuthenticatedUser,
+        importCurriculum?: (tx: Prisma.TransactionClient, courseId: string) => Promise<void>) {
+        if (actor.role === 'INSTRUCTOR' && input.instructorId !== actor.userId) {
+            throw new BadRequestException('Instructors can only create their own courses');
+        }
         validatePrice(input.pricingType, input.priceMinorUnits, input.discountedPriceMinorUnits);
         await this.assertCategoryAndInstructor(input.categoryId, input.instructorId);
         const slug = normalizeSlug(input.slug ?? input.title);
         if (!slug) throw new BadRequestException('A valid course slug is required');
         try {
-            const course = await this.prisma.course.create({
+            const create = async (database: Prisma.TransactionClient) => {
+                if (actor.role === 'INSTRUCTOR') await this.assertInstructorMedia(database, input, actor.userId);
+                const course = await database.course.create({
                 data: {
                     title: input.title.trim(),
                     slug,
@@ -275,8 +301,13 @@ export class CoursesService {
                     status: CourseStatus.DRAFT,
                 },
                 select: this.courseSelect,
-            });
-            this.logger.log(`Admin ${actor.userId} created course ${course.id}`);
+                });
+                if (!importCurriculum) return course;
+                await importCurriculum(database, course.id);
+                return database.course.findUniqueOrThrow({ where: { id: course.id }, select: this.courseSelect });
+            };
+            const course = actor.role === 'INSTRUCTOR' ? await courseTransaction(this.prisma, create, importCurriculum ? 30000 : undefined) : await create(this.prisma);
+            this.logger.log(`${actor.role} ${actor.userId} created course ${course.id}`);
             return this.mapCourse(course);
         } catch (error: unknown) {
             const mapped = mapPrismaError(error);
@@ -285,9 +316,39 @@ export class CoursesService {
         }
     }
 
-    async updateCourse(input: AdminUpdateCourseInput) {
+    private async assertInstructorMedia(
+        database: Prisma.TransactionClient,
+        input: { thumbnailUrl?: string | null; promotionalVideoUrl?: string | null },
+        ownerId: string,
+        courseId?: string,
+    ) {
+        const media = [
+            { value: input.thumbnailUrl, purpose: 'COURSE_THUMBNAIL' },
+            { value: input.promotionalVideoUrl, purpose: 'COURSE_PROMOTIONAL_VIDEO' },
+        ];
+        for (const { value, purpose } of media) {
+            if (!value) continue;
+            const url = URL.canParse(value) ? new URL(value) : null;
+            if (!url || url.protocol !== 'https:' || url.username || url.password ||
+                [...url.searchParams.keys()].some((key) => key.toLowerCase().startsWith('x-amz-'))) {
+                throw new BadRequestException('Choose a public HTTPS address or upload course media');
+            }
+            url.search = '';
+            url.hash = '';
+            const match = await database.mediaAsset.findUnique({ where: { publicUrl: url.href }, select: { id: true } });
+            if (!match) continue;
+            const asset = await lockMediaAsset(database, match.id);
+            if (!asset || asset.visibility !== 'PUBLIC' || asset.uploadedById !== ownerId || asset.status !== 'READY' || asset.purpose !== purpose ||
+                (asset.courseScopeId && asset.courseScopeId !== courseId)) {
+                throw new BadRequestException('Choose a verified upload that belongs to this course');
+            }
+        }
+    }
+
+    async updateCourse(input: AdminUpdateCourseInput, ownerId?: string) {
         return courseTransaction(this.prisma, async (transaction) => {
-            const existing = await transaction.course.findUnique({ where: { id: input.id }, select: this.courseSelect });
+            const where = { id: input.id, ...(ownerId ? { instructorId: ownerId } : {}) };
+            const existing = await transaction.course.findUnique({ where, select: this.courseSelect });
             if (!existing) throw new NotFoundException('Course not found');
 
             const text = (value?: string) => value?.trim();
@@ -333,6 +394,10 @@ export class CoursesService {
             if (!canEditCourse(existing.status)) {
                 throw new ConflictException('Material course content cannot be edited in this lifecycle state');
             }
+            if (ownerId) {
+                if (changes.instructorId) throw new BadRequestException('Course ownership cannot be changed here');
+                await this.assertInstructorMedia(transaction, changes, ownerId, input.id);
+            }
             if (changes.categoryId || changes.instructorId) {
                 await this.assertCategoryAndInstructor(
                     changes.categoryId ?? existing.category.id,
@@ -354,7 +419,7 @@ export class CoursesService {
             }
             try {
                 const course = await transaction.course.update({
-                    where: { id: input.id, status: existing.status },
+                    where: { ...where, status: existing.status },
                     data: changes,
                     select: this.courseSelect,
                 });
@@ -365,10 +430,11 @@ export class CoursesService {
         });
     }
 
-    async deleteCourse(id: string) {
+    async deleteCourse(id: string, ownerId?: string) {
         return courseTransaction(this.prisma, async (transaction) => {
             const course = await transaction.course.findUnique({
-                where: { id }, select: { status: true, _count: { select: { reviews: true, enrollments: true, orders: true } } },
+                where: { id, ...(ownerId ? { instructorId: ownerId } : {}) },
+                select: { status: true, _count: { select: { reviews: true, enrollments: true, orders: true } } },
             });
             if (!course) throw new NotFoundException('Course not found');
             if (course._count.enrollments || course._count.orders) {
@@ -377,7 +443,7 @@ export class CoursesService {
             if (!canDeleteCourse(course.status, course._count.reviews)) {
                 throw new ConflictException('Only drafts without review history can be deleted');
             }
-            await transaction.course.delete({ where: { id, status: CourseStatus.DRAFT } });
+            await transaction.course.delete({ where: { id, status: CourseStatus.DRAFT, ...(ownerId ? { instructorId: ownerId } : {}) } });
             return { success: true, message: 'Course deleted successfully' };
         });
     }
@@ -395,26 +461,26 @@ export class CoursesService {
         return this.mapCourse(course);
     }
 
-    async submitCourse(id: string) {
-        return this.transitionCourse(id, CourseStatus.PENDING_REVIEW, { submittedAt: new Date(), approvedAt: null });
+    async submitCourse(id: string, ownerId?: string) {
+        return this.transitionCourse(id, CourseStatus.PENDING_REVIEW, { submittedAt: new Date(), approvedAt: null }, undefined, false, ownerId);
     }
 
-    async withdrawSubmission(id: string) {
-        return this.transitionCourse(id, CourseStatus.DRAFT, { submittedAt: null, approvedAt: null }, CourseStatus.PENDING_REVIEW);
+    async withdrawSubmission(id: string, ownerId?: string) {
+        return this.transitionCourse(id, CourseStatus.DRAFT, { submittedAt: null, approvedAt: null }, CourseStatus.PENDING_REVIEW, false, ownerId);
     }
 
     async publishCourse(id: string) {
         return this.transitionCourse(id, CourseStatus.PUBLISHED, { publishedAt: new Date(), archivedAt: null });
     }
 
-    async archiveCourse(id: string) {
-        return this.transitionCourse(id, CourseStatus.ARCHIVED, { archivedAt: new Date() });
+    async archiveCourse(id: string, ownerId?: string) {
+        return this.transitionCourse(id, CourseStatus.ARCHIVED, { archivedAt: new Date() }, undefined, false, ownerId);
     }
 
-    async restoreCourse(id: string, expectedStatus?: CourseStatus) {
+    async restoreCourse(id: string, expectedStatus?: CourseStatus, ownerId?: string) {
         return this.transitionCourse(id, CourseStatus.DRAFT, {
             archivedAt: null, publishedAt: null, submittedAt: null, approvedAt: null,
-        }, expectedStatus, true);
+        }, expectedStatus, true, ownerId);
     }
 
     private async transitionCourse(
@@ -423,11 +489,19 @@ export class CoursesService {
         dates: Pick<Prisma.CourseUpdateInput, 'submittedAt' | 'approvedAt' | 'publishedAt' | 'archivedAt'>,
         expectedStatus?: CourseStatus,
         restoring = false,
+        ownerId?: string,
     ) {
         return courseTransaction(this.prisma, async (transaction) => {
-            const course = await transaction.course.findUnique({ where: { id }, select: this.courseSelect });
+            const where = { id, ...(ownerId ? { instructorId: ownerId } : {}) };
+            const course = await transaction.course.findUnique({ where, select: this.courseSelect });
             if (!course) throw new NotFoundException('Course not found');
             assertCourseStatus(course.status, expectedStatus);
+            if (ownerId && restoring && course.status !== CourseStatus.ARCHIVED && course.status !== CourseStatus.REJECTED) {
+                throw new ConflictException('Only archived or rejected courses can be restored to draft here');
+            }
+            if (ownerId && restoring && course.status === CourseStatus.ARCHIVED && course._count.enrollments) {
+                throw new ConflictException('This archived course has enrollment history. Contact an administrator to revise it.');
+            }
             if (restoring && (
                 course.status === CourseStatus.PENDING_REVIEW ||
                 (course.status === CourseStatus.PUBLISHED && expectedStatus !== CourseStatus.PUBLISHED)
@@ -446,10 +520,11 @@ export class CoursesService {
                         },
                     },
                 });
-                this.validateReadiness({ ...course, sections });
+                const errors = this.readinessIssues({ ...course, sections });
+                if (errors.length) throw new BadRequestException(`Course is not ready for review: ${errors.join('; ')}`);
             }
             const updated = await transaction.course.update({
-                where: { id, status: course.status },
+                where: { ...where, status: course.status },
                 data: { ...dates, status: destination },
                 select: this.courseSelect,
             });
@@ -457,7 +532,17 @@ export class CoursesService {
         });
     }
 
-    private validateReadiness(course: {
+    async instructorReadiness(id: string, ownerId: string) {
+        const course = await this.prisma.course.findUnique({
+            where: { id, instructorId: ownerId },
+            select: { ...this.courseSelect, sections: { orderBy: { position: 'asc' },
+                select: { lessons: { orderBy: { position: 'asc' }, select: lessonReadinessSelect } } } },
+        });
+        if (!course) throw new NotFoundException('Course not found');
+        return this.readinessIssues(course);
+    }
+
+    private readinessIssues(course: {
         title: string; description: string; thumbnailUrl: string | null;
         category: { status?: CategoryStatus } | null;
         instructor: { status?: UserStatus; role?: UserRole } | null;
@@ -483,7 +568,7 @@ export class CoursesService {
                 errors.push(...lessonReadinessErrors(lesson));
             }
         }
-        if (errors.length > 0) throw new BadRequestException(`Course is not ready for review: ${errors.join('; ')}`);
+        return errors;
     }
 
     async findPublicCourses(pagination: PaginationInput, filter?: AdminCoursesFilterInput) {

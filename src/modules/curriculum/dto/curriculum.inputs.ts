@@ -128,3 +128,25 @@ export class AdminSaveCourseLessonInput extends AdminCreateCourseLessonInput {
     @IsOptional() @IsArray() @ArrayMaxSize(4) @ValidateNested({ each: true }) @Type(() => LessonVideoQualityInput)
     videoQualities?: LessonVideoQualityInput[];
 }
+
+@InputType()
+export class InstructorImportResourceInput {
+    @Field(() => String) @IsString() @MinLength(2) @MaxLength(180) title!: string;
+    @Field(() => String) @IsString() @MaxLength(2048) url!: string;
+    @Field(() => LessonResourceType, { defaultValue: 'LINK' }) @IsIn(['LINK']) type = 'LINK' as const;
+}
+
+@InputType()
+export class InstructorImportLessonInput extends OmitType(AdminCreateCourseLessonInput,
+    ['sectionId', 'mediaAssetId', 'videoUrl', 'documentUrl'] as const) {
+    @Field(() => [InstructorImportResourceInput], { defaultValue: [] })
+    @IsArray() @ArrayMaxSize(20) @ValidateNested({ each: true }) @Type(() => InstructorImportResourceInput)
+    resources: InstructorImportResourceInput[] = [];
+}
+
+@InputType()
+export class InstructorImportModuleInput extends OmitType(AdminCreateCourseSectionInput, ['courseId'] as const) {
+    @Field(() => [InstructorImportLessonInput], { defaultValue: [] })
+    @IsArray() @ArrayMaxSize(100) @ValidateNested({ each: true }) @Type(() => InstructorImportLessonInput)
+    lessons: InstructorImportLessonInput[] = [];
+}

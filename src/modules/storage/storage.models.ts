@@ -41,10 +41,29 @@ export class AdminMediaFilter {
 }
 
 @ObjectType()
+export class MediaUploadFormat {
+    @Field(() => String) extension!: string;
+    @Field(() => String) mimeType!: string;
+}
+
+@ObjectType()
 export class MediaUploadOptions {
     @Field(() => Boolean) enabled!: boolean;
     @Field(() => Int) maxBytes!: number;
     @Field(() => [String]) extensions!: string[];
+    @Field(() => [MediaUploadFormat]) formats!: MediaUploadFormat[];
+}
+
+@InputType()
+export class MediaSelectionField {
+    @Field(() => MediaPurpose) @IsEnum(MediaPurpose) purpose!: MediaPurpose;
+    @Field(() => ID, { nullable: true }) @IsOptional() @IsUUID() courseId?: string;
+}
+
+@InputType()
+export class MediaSelectionFilter extends MediaSelectionField {
+    @Field(() => String, { nullable: true }) @IsOptional() @IsString() @MaxLength(120) search?: string;
+    @Field(() => String, { nullable: true }) @IsOptional() @Matches(/^[a-z0-9]{1,5}$/) extension?: string;
 }
 
 @ObjectType()
@@ -58,6 +77,12 @@ export class StoredMediaAsset {
     @Field(() => MediaVisibility) visibility!: MediaVisibility;
     @Field(() => String, { nullable: true }) publicUrl?: string | null;
     @Field(() => Date) createdAt!: Date;
+}
+
+@ObjectType()
+export class MediaSelectionPage {
+    @Field(() => [StoredMediaAsset]) items!: StoredMediaAsset[];
+    @Field(() => PaginationMeta) meta!: PaginationMeta;
 }
 
 @ObjectType()
@@ -89,6 +114,7 @@ export class MediaAttachment {
 
 @ObjectType()
 export class AdminStoredMedia extends StoredMediaAsset {
+    @Field(() => Boolean, { nullable: true }) inUse?: boolean;
     @Field(() => String, { nullable: true }) uploader?: string | null;
     @Field(() => ID, { nullable: true }) courseScopeId?: string | null;
     @Field(() => [MediaAttachment]) attachments!: MediaAttachment[];

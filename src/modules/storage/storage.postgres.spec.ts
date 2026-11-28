@@ -104,6 +104,33 @@ describe.runIf(Boolean(isolated))('storage with PostgreSQL coordination and a fi
         expect(provider.publish).toHaveBeenCalledTimes(1);
     });
 
+    it('limits reusable media to the authenticated field, owner, file type and course', async () => {
+        const page = { page: 1, limit: 12 };
+        const avatarField = { purpose: 'USER_AVATAR' as const };
+        const mine = await storage.create(student, input({ ...avatarField, fileName: 'portrait.png' }));
+        const other = await storage.create(instructor, input({ ...avatarField, fileName: 'other-portrait.png' }));
+        await storage.complete(student.userId, mine.asset.id);
+        await storage.complete(instructor.userId, other.asset.id);
+        const result = await storage.selection(student, page, { ...avatarField, search: 'portrait', extension: 'png' });
+        expect(result.items.map(({ id }) => id)).toEqual([mine.asset.id]);
+        expect((await storage.selection(student, page, { ...avatarField, extension: 'jpg' })).items).toEqual([]);
+        await expect(access.selectionPreview(student, avatarField, other.asset.id)).rejects.toThrow('unavailable');
+        await expect(storage.selection(student, page, { purpose: 'CATEGORY_IMAGE' })).rejects.toThrow('cannot upload');
+
+        const lessonField = { purpose: 'LESSON_VIDEO' as const, courseId };
+        checkedSize = mp4.length;
+        checkedType = 'video/mp4';
+        bytes = mp4;
+        const reserved = await storage.create(instructor, input({ ...lessonField, fileName: 'lesson.mp4', mimeType: checkedType, sizeBytes: checkedSize }));
+        await storage.complete(instructor.userId, reserved.asset.id);
+        expect((await storage.selection(instructor, page, lessonField)).items).toMatchObject([{ id: reserved.asset.id, publicUrl: null }]);
+        await expect(access.selectionPreview(instructor, { ...lessonField, purpose: 'LESSON_DOCUMENT' }, reserved.asset.id)).rejects.toThrow('unavailable');
+        await expect(access.selectionPreview(student, lessonField, reserved.asset.id)).rejects.toThrow('cannot upload');
+        await expect(access.selectionPreview(admin, lessonField, reserved.asset.id)).rejects.toThrow('unavailable');
+        await expect(access.selectionPreview(instructor, lessonField, reserved.asset.id)).resolves.toMatchObject({ url: 'https://private.fixture.example/read' });
+        expect(await prisma.mediaAsset.count({ where: { id: reserved.asset.id } })).toBe(1);
+    });
+
     it('keeps the hard quota atomic across simultaneous upload reservations', async () => {
         const { reservedBytes } = await storage.stats();
         provider.config.hardLimit = reservedBytes + png.length * 3;

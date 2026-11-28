@@ -9,5 +9,6 @@ import { CurriculumService } from './curriculum.service.js';
 @Module({
     imports: [AuthorizationModule, AuthModule, DatabaseModule],
     providers: [CurriculumService, AdminCurriculumResolver],
+    exports: [CurriculumService],
 })
 export class CurriculumModule {}
