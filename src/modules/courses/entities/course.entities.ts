@@ -74,6 +74,7 @@ export class AdminCourse {
 @ObjectType()
 export class PublicCourseLesson {
     @Field(() => String) title!: string;
+    @Field(() => String) type!: string;
     @Field(() => Int, { nullable: true }) durationSeconds!: number | null;
     @Field(() => Boolean) isPreview!: boolean;
     @Field(() => ID, { nullable: true }) previewLessonId?: string | null;

@@ -13,13 +13,19 @@ describe('Public course details', () => {
     it('returns ordered curriculum metadata with the published course and excludes private lesson fields', async () => {
         const id = 'f14325b0-5fe2-4567-8109-a5ab2def217f';
         const slug = 'introduction-to-design';
-        const lesson = { title: 'Introduction', durationSeconds: 90, isPreview: false };
+        const lesson = { title: 'Introduction', type: 'VIDEO', durationSeconds: 90, isPreview: false };
+        const text = { title: 'Welcome notes', type: 'TEXT', durationSeconds: null, isPreview: true };
+        const pdf = { title: 'Workbook', type: 'PDF', durationSeconds: null, isPreview: true };
         const findFirst = vi.fn().mockResolvedValue({
             id,
             slug,
             title: 'Introduction to Design',
             updatedAt: new Date('2026-11-22T00:00:00.000Z'),
-            sections: [{ title: 'Getting started', lessons: [{ ...lesson, _count: { resources: 2 } }] }],
+            sections: [{ title: 'Getting started', lessons: [
+                { ...lesson, id: 'locked-video', _count: { resources: 2 } },
+                { ...text, id: 'preview-text', content: 'Only available through the preview endpoint', _count: { resources: 0 } },
+                { ...pdf, id: 'preview-pdf', documentAssetId: 'asset-id', _count: { resources: 0 } },
+            ] }],
         });
         const findMany = vi.fn().mockResolvedValue([]);
         const findUnique = vi.fn().mockResolvedValue({ categoryId: "category-id" });
@@ -44,7 +50,7 @@ describe('Public course details', () => {
                             id
                             slug
                             updatedAt
-                            curriculum { title lessons { title durationSeconds isPreview resourceCount } }
+                            curriculum { title lessons { title type durationSeconds isPreview resourceCount previewLessonId } }
                         }
                     }
                 `,
@@ -57,7 +63,11 @@ describe('Public course details', () => {
                 id,
                 slug,
                 updatedAt: '2026-11-22T00:00:00.000Z',
-                curriculum: [{ title: 'Getting started', lessons: [{ ...lesson, resourceCount: 2 }] }],
+                curriculum: [{ title: 'Getting started', lessons: [
+                    { ...lesson, resourceCount: 2, previewLessonId: null },
+                    { ...text, resourceCount: 0, previewLessonId: 'preview-text' },
+                    { ...pdf, resourceCount: 0, previewLessonId: 'preview-pdf' },
+                ] }],
             });
             expect(findFirst).toHaveBeenCalledWith(expect.objectContaining({
                 where: {
@@ -80,6 +90,7 @@ describe('Public course details', () => {
                                     isPreview: true,
                                     type: true,
                                     videoAssetId: true,
+                                    documentAssetId: true,
                                     _count: { select: { resources: true } },
                                 },
                             },
@@ -97,7 +108,7 @@ describe('Public course details', () => {
 
             const lessonType = schema.getType('PublicCourseLesson');
             expect(isObjectType(lessonType) && Object.keys(lessonType.getFields()).sort()).toEqual([
-                'durationSeconds', 'isPreview', 'previewLessonId', 'resourceCount', 'title',
+                'durationSeconds', 'isPreview', 'previewLessonId', 'resourceCount', 'title', 'type',
             ]);
 
             findFirst.mockResolvedValueOnce(null);

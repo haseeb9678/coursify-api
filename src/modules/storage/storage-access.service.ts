@@ -15,6 +15,13 @@ const videoSelect = {
     },
 } satisfies Prisma.CourseLessonSelect;
 
+function publicPreviewScope(courseId: string, lessonId: string): Prisma.CourseLessonWhereInput {
+    return {
+        id: lessonId, isPreview: true,
+        section: { course: { id: courseId, status: 'PUBLISHED', category: { status: 'ACTIVE' }, instructor: { status: 'ACTIVE', role: 'INSTRUCTOR' } } },
+    };
+}
+
 @Injectable()
 export class StorageAccessService {
     constructor(
@@ -67,14 +74,23 @@ export class StorageAccessService {
         this.provider.requireClient();
         await this.storage.rateLimit(`preview:${ipKey}`, 20);
         const lesson = await this.prisma.courseLesson.findFirst({
-            where: {
-                id: lessonId, isPreview: true, type: 'VIDEO',
-                section: { course: { id: courseId, status: 'PUBLISHED', category: { status: 'ACTIVE' }, instructor: { status: 'ACTIVE', role: 'INSTRUCTOR' } } },
-            },
-            select: videoSelect,
+            where: { ...publicPreviewScope(courseId, lessonId), type: { in: ['VIDEO', 'PDF'] } },
+            select: { type: true, documentAsset: true, ...videoSelect },
         });
         if (!lesson) throw new NotFoundException('Media is unavailable.');
-        return this.signedVideo(lesson, height);
+        return lesson.type === 'VIDEO'
+            ? this.signedVideo(lesson, height)
+            : this.signed(height == null ? lesson.documentAsset : null);
+    }
+
+    async previewText(ipKey: string, courseId: string, lessonId: string) {
+        await this.storage.rateLimit(`preview:${ipKey}`, 20);
+        const lesson = await this.prisma.courseLesson.findFirst({
+            where: { ...publicPreviewScope(courseId, lessonId), type: 'TEXT' },
+            select: { content: true },
+        });
+        if (!lesson) throw new NotFoundException('Text preview is unavailable.');
+        return lesson.content ?? '';
     }
 
     async adminRead(userId: string, id: string) {

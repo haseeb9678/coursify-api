@@ -17,6 +17,10 @@ import {
 import { StorageAccessService } from './storage-access.service.js';
 import { StorageService } from './storage.service.js';
 
+function previewRateKey({ req }: GraphQLContext) {
+    return createHash('sha256').update(req.ip ?? req.socket.remoteAddress ?? 'unknown').digest('hex');
+}
+
 @Injectable()
 export class StorageOriginGuard implements CanActivate {
     constructor(private readonly config: ConfigService) {}
@@ -92,13 +96,21 @@ export class StorageResolver {
 
     @Query(() => MediaReadAccess)
     lessonPreviewMediaAccess(
-        @Context() { req }: GraphQLContext,
+        @Context() context: GraphQLContext,
         @Args('courseId', { type: () => ID }, ParseUUIDPipe) courseId: string,
         @Args('lessonId', { type: () => ID }, ParseUUIDPipe) lessonId: string,
         @Args('height', { type: () => Int, nullable: true }) height?: number,
     ) {
-        const key = createHash('sha256').update(req.ip ?? req.socket.remoteAddress ?? 'unknown').digest('hex');
-        return this.access.preview(key, courseId, lessonId, height);
+        return this.access.preview(previewRateKey(context), courseId, lessonId, height);
+    }
+
+    @Query(() => String)
+    lessonPreviewText(
+        @Context() context: GraphQLContext,
+        @Args('courseId', { type: () => ID }, ParseUUIDPipe) courseId: string,
+        @Args('lessonId', { type: () => ID }, ParseUUIDPipe) lessonId: string,
+    ) {
+        return this.access.previewText(previewRateKey(context), courseId, lessonId);
     }
 
     @Mutation(() => String, { nullable: true })

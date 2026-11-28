@@ -201,6 +201,8 @@ export class CommerceLearningResource {
     @Field(() => String) type!: string;
     @Field(() => String) url!: string;
     @Field(() => Boolean) hasManagedMedia!: boolean;
+    @Field(() => String, { nullable: true }) fileName?: string | null;
+    @Field(() => String, { nullable: true }) mimeType?: string | null;
 }
 
 @ObjectType()

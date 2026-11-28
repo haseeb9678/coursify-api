@@ -562,7 +562,8 @@ export class CoursesService {
                         lessons: {
                             orderBy: { position: 'asc' },
                             select: {
-                                id: true, title: true, durationSeconds: true, isPreview: true, type: true, videoAssetId: true,
+                                id: true, title: true, durationSeconds: true, isPreview: true, type: true,
+                                videoAssetId: true, documentAssetId: true,
                                 _count: { select: { resources: true } },
                             },
                         },
@@ -576,9 +577,10 @@ export class CoursesService {
             ...await this.mapPublicCourse(course),
             curriculum: course.sections.map(({ title, lessons }) => ({
                 title,
-                lessons: lessons.map(({ id, title, durationSeconds, isPreview, type, videoAssetId, _count }) => ({
-                    title, durationSeconds, isPreview, resourceCount: _count.resources,
-                    ...(isPreview && type === 'VIDEO' && videoAssetId ? { previewLessonId: id } : {}),
+                lessons: lessons.map(({ id, title, durationSeconds, isPreview, type, videoAssetId, documentAssetId, _count }) => ({
+                    title, type, durationSeconds, isPreview, resourceCount: _count.resources,
+                    ...(isPreview && (type === 'TEXT' || (type === 'VIDEO' && videoAssetId) || (type === 'PDF' && documentAssetId))
+                        ? { previewLessonId: id } : {}),
                 })),
             })),
         };

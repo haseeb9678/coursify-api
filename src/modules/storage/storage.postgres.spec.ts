@@ -188,7 +188,18 @@ describe.runIf(Boolean(isolated))('storage with PostgreSQL coordination and a fi
             purpose: 'LESSON_DOCUMENT', fileName: 'worksheet.pdf', mimeType: checkedType, sizeBytes: checkedSize, courseId,
         }));
         await storage.complete(admin.userId, pdf.asset.id);
-        await curriculum.createLesson({ sectionId, type: 'PDF', title: 'Worksheet', isPreview: false, mediaAssetId: pdf.asset.id }, admin);
+        const pdfLesson = await curriculum.createLesson({ sectionId, type: 'PDF', title: 'Worksheet', isPreview: false, mediaAssetId: pdf.asset.id }, admin);
+        const previewText = 'This is the first line.\nThis is the second line.';
+        const textLesson = await curriculum.createLesson({ sectionId, type: 'TEXT', title: 'Reading', isPreview: true,
+            content: previewText }, admin);
+        const resourceUpload = await storage.create(admin, input({
+            purpose: 'LESSON_RESOURCE', fileName: 'notes.pdf', mimeType: checkedType, sizeBytes: checkedSize, courseId,
+        }));
+        await storage.complete(admin.userId, resourceUpload.asset.id);
+        const resource = await curriculum.createResource({
+            lessonId: textLesson.id, title: 'Private notes', type: 'PDF', url: '', mediaAssetId: resourceUpload.asset.id,
+        }, admin);
+        await expect(access.previewText('visitor', courseId, textLesson.id)).rejects.toThrow('unavailable');
         await prisma.course.update({
             where: { id: courseId },
             data: { description: 'A complete course description for review.', thumbnailUrl: 'https://example.test/cover.png', learningOutcomes: ['Learn the topic'] },
@@ -206,7 +217,10 @@ describe.runIf(Boolean(isolated))('storage with PostgreSQL coordination and a fi
         await expect(reviews.approve({ courseId }, admin)).resolves.toMatchObject({ course: { status: 'APPROVED' } });
         await expect(courses.publishCourse(courseId)).resolves.toMatchObject({ status: 'PUBLISHED' });
 
+        await expect(access.resource(student, courseId, textLesson.id, resource.id)).rejects.toThrow('outside');
         await prisma.enrollment.create({ data: { courseId, userId: student.userId, source: 'FREE' } });
+        await expect(access.resource(student, courseId, textLesson.id, resource.id)).resolves.toHaveProperty('url');
+        await expect(access.resource(student, courseId, pdfLesson.id, resource.id)).rejects.toThrow('outside');
         await expect(access.lesson(student, courseId, lesson.id)).resolves.toMatchObject({ availableQualities: [360] });
         await expect(access.lesson(student, courseId, lesson.id, 360)).resolves.toHaveProperty('url');
         expect(vi.mocked(provider.signRead).mock.calls.at(-1)?.[0].id).toBe(lowerQuality.asset.id);
@@ -215,8 +229,17 @@ describe.runIf(Boolean(isolated))('storage with PostgreSQL coordination and a fi
         await expect(access.preview('visitor', courseId, lesson.id)).rejects.toThrow('unavailable');
         await prisma.courseLesson.update({ where: { id: lesson.id }, data: { isPreview: true } });
         await expect(access.preview('visitor', courseId, lesson.id, 360)).resolves.toMatchObject({ availableQualities: [360] });
+        await expect(access.previewText('visitor', courseId, textLesson.id)).resolves.toBe(previewText);
+        await expect(access.previewText('visitor', courseId, pdfLesson.id)).rejects.toThrow('unavailable');
+        await expect(access.previewText('visitor', randomUUID(), textLesson.id)).rejects.toThrow('unavailable');
+        await expect(access.preview('visitor', courseId, pdfLesson.id)).rejects.toThrow('unavailable');
+        await prisma.courseLesson.update({ where: { id: pdfLesson.id }, data: { isPreview: true } });
+        await expect(access.preview('visitor', courseId, pdfLesson.id)).resolves.toHaveProperty('url');
+        expect(provider.signRead).toHaveBeenLastCalledWith(expect.objectContaining({ id: pdf.asset.id }));
+        await expect(access.preview('visitor', courseId, pdfLesson.id, 360)).rejects.toThrow('unavailable');
         await prisma.enrollment.update({ where: { userId_courseId: { userId: student.userId, courseId } }, data: { status: 'REVOKED' } });
         await expect(access.lesson(student, courseId, lesson.id)).rejects.toThrow('outside');
+        await expect(access.resource(student, courseId, textLesson.id, resource.id)).rejects.toThrow('outside');
     }, 15000);
 
     it('blocks deleting a public asset shared by two entities and protects replacement history', async () => {

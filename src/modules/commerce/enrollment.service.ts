@@ -66,7 +66,8 @@ export class EnrollmentService {
                             content: true, videoUrl: true, documentUrl: true, durationSeconds: true,
                             videoAssetId: true, documentAssetId: true,
                             resources: { orderBy: { position: 'asc' }, select: {
-                                id: true, title: true, type: true, url: true, mediaAssetId: true,
+                                id: true, title: true, type: true, url: true, fileName: true,
+                                mediaAsset: { select: { originalFileName: true, mimeType: true } },
                             } },
                         } },
                     } },
@@ -79,7 +80,11 @@ export class EnrollmentService {
                     ...section,
                     lessons: section.lessons.map(({ videoAssetId, documentAssetId, resources, ...lesson }) => ({
                         ...lesson, hasManagedMedia: Boolean(videoAssetId || documentAssetId),
-                        resources: resources.map(({ mediaAssetId, ...resource }) => ({ ...resource, hasManagedMedia: Boolean(mediaAssetId) })),
+                        resources: resources.map(({ mediaAsset, ...resource }) => ({
+                            ...resource, hasManagedMedia: Boolean(mediaAsset),
+                            fileName: mediaAsset?.originalFileName ?? resource.fileName,
+                            mimeType: mediaAsset?.mimeType ?? null,
+                        })),
                     })),
                 })),
             };

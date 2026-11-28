@@ -77,6 +77,7 @@ async function bootstrap(): Promise<void> {
   logger.log(`GraphQL URL: ${serverUrl}${graphqlPath}`);
 }
 
+
 // Handle application startup failures
 bootstrap().catch((error: unknown) => {
   const logger = new Logger('Bootstrap');
