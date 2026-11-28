@@ -12,4 +12,8 @@ export default registerAs('jwt', () => ({
     refreshExpiresIn: Number(
         process.env.JWT_REFRESH_EXPIRES_IN ?? 604800,
     ),
+
+    sessionMaxAge: Number(
+        process.env.JWT_SESSION_MAX_AGE ?? process.env.JWT_REFRESH_EXPIRES_IN ?? 604800,
+    ),
 }));

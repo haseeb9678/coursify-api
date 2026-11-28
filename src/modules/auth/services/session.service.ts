@@ -1,10 +1,8 @@
-import {
-    Injectable,
-    UnauthorizedException,
-} from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 
 import type { Prisma } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../../database/prisma.service.js';
+import { REFRESH_RETRY_WINDOW_MS } from '../constants/auth.constants.js';
 
 import type {
     CreateSessionData,
@@ -25,12 +23,11 @@ export class SessionService {
                 userId: data.userId,
                 refreshTokenHash: data.refreshTokenHash,
                 expiresAt: data.expiresAt,
+                createdAt: data.createdAt,
                 userAgent: data.userAgent ?? null,
                 ipAddress: data.ipAddress ?? null,
             },
-            omit: {
-                refreshTokenHash: true,
-            },
+            select: { id: true },
         });
     }
 
@@ -40,36 +37,29 @@ export class SessionService {
             where: {
                 id: sessionId,
             },
-            omit: {
-                refreshTokenHash: true,
+            select: {
+                id: true, userId: true, expiresAt: true, revokedAt: true,
             },
         });
     }
 
-    // Find an active authentication session
-    async findActiveSession(
+    async findRefreshSession(
         sessionId: string,
         userId: string,
     ) {
-        return this.prisma.refreshSession.findFirst({
+        return this.prisma.refreshSession.findUnique({
             where: {
                 id: sessionId,
                 userId,
-                revokedAt: null,
-                expiresAt: {
-                    gt: new Date(),
-                },
             },
-            omit: {
-                refreshTokenHash: true,
-            },
+            include: { user: { select: { status: true } } },
         });
     }
 
     // Rotate refresh token atomically
     async rotateSession(
         data: RotateSessionData,
-    ): Promise<void> {
+    ): Promise<boolean> {
         const result =
             await this.prisma.refreshSession.updateMany({
                 where: {
@@ -77,20 +67,21 @@ export class SessionService {
                     userId: data.userId,
                     refreshTokenHash: data.currentTokenHash,
                     revokedAt: null,
+                    user: { status: 'ACTIVE' },
                     expiresAt: {
                         gt: new Date(),
                     },
                 },
                 data: {
                     refreshTokenHash: data.newTokenHash,
+                    previousRefreshTokenHash: data.currentTokenHash,
+                    refreshRequestHash: data.requestHash,
+                    refreshRotatedAt: data.rotatedAt,
+                    expiresAt: data.expiresAt,
                 },
             });
 
-        if (result.count !== 1) {
-            throw new UnauthorizedException(
-                'Invalid or expired refresh session',
-            );
-        }
+        return result.count === 1;
     }
 
     // Revoke the current authentication session
@@ -107,7 +98,13 @@ export class SessionService {
                     revokedAt: null,
 
                     ...(refreshTokenHash !== undefined
-                        ? { refreshTokenHash }
+                        ? { OR: [
+                            { refreshTokenHash },
+                            {
+                                previousRefreshTokenHash: refreshTokenHash,
+                                refreshRotatedAt: { gt: new Date(Date.now() - REFRESH_RETRY_WINDOW_MS) },
+                            },
+                        ] }
                         : {}),
                 },
                 data: {

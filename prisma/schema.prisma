@@ -62,7 +62,10 @@ model User {
 model RefreshSession {
   id               String @id @default(uuid()) @db.Uuid
   userId           String @db.Uuid
-  refreshTokenHash String
+  refreshTokenHash         String
+  previousRefreshTokenHash String?
+  refreshRequestHash       String?
+  refreshRotatedAt         DateTime?
 
   userAgent String?
   ipAddress String?

@@ -1,7 +1,5 @@
 import {
     Injectable,
-    UnauthorizedException,
-    ForbiddenException,
 } from '@nestjs/common';
 
 import { ConfigService } from '@nestjs/config';
@@ -14,6 +12,7 @@ import { UsersService } from '../../users/users.service.js';
 import { SessionService } from '../services/session.service.js';
 
 import { AUTH_COOKIES } from '../constants/auth.constants.js';
+import { authError } from '../auth-errors.js';
 import { UserStatus } from '../../../generated/prisma/enums.js';
 
 import type { AccessTokenPayload } from '../types/jwt-payload.type.js';
@@ -66,43 +65,27 @@ export class JwtStrategy extends PassportStrategy(
             typeof payload.jti !== 'string' ||
             typeof payload.exp !== 'number'
         ) {
-            throw new UnauthorizedException(
-                'Invalid access token',
-            );
+            throw authError('ACCESS_TOKEN_INVALID');
         }
 
         // Verify session and user
         const [session, user] = await Promise.all([
-            this.sessionService.findActiveSession(
-                payload.sid,
-                payload.sub,
-            ),
+            this.sessionService.findSessionById(payload.sid),
 
             this.usersService.findUserById(payload.sub),
         ]);
 
-        if (!session) {
-            throw new UnauthorizedException(
-                'Session is invalid or expired',
-            );
+        if (!session || session.userId !== payload.sub || session.revokedAt || !user) {
+            throw authError('SESSION_REVOKED');
         }
-
-        if (!user) {
-            throw new UnauthorizedException(
-                'User no longer exists',
-            );
-        }
-
-        if (user.status !== UserStatus.ACTIVE) {
-            throw new ForbiddenException(
-                'Your account is not active',
-            );
-        }
+        if (session.expiresAt.getTime() <= Date.now()) throw authError('SESSION_EXPIRED');
+        if (user.status !== UserStatus.ACTIVE) throw authError('ACCOUNT_INACTIVE');
 
         return {
             userId: user.id,
             sessionId: session.id,
             role: user.role,
+            accessExpiresAt: Math.min(payload.exp * 1000, session.expiresAt.getTime()),
         };
     }
 }

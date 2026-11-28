@@ -52,6 +52,9 @@ export function formatGraphQLError(
         extensions: {
             code,
             statusCode,
+            ...(statusCode < 500 && typeof extensions?.authReason === 'string'
+                ? { authReason: extensions.authReason }
+                : {}),
 
             ...(statusCode < 500 &&
                 details?.length

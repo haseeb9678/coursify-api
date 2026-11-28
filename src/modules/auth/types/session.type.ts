@@ -3,6 +3,7 @@ export interface CreateSessionData {
     userId: string;
     refreshTokenHash: string;
     expiresAt: Date;
+    createdAt: Date;
 
     userAgent?: string;
     ipAddress?: string;
@@ -13,4 +14,7 @@ export interface RotateSessionData {
     userId: string;
     currentTokenHash: string;
     newTokenHash: string;
+    requestHash: string;
+    rotatedAt: Date;
+    expiresAt: Date;
 }

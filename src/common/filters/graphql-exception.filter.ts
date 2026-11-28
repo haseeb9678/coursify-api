@@ -41,6 +41,10 @@ export class GraphqlExceptionFilter
             const statusCode = mappedException.getStatus();
 
             const response = mappedException.getResponse();
+            const authReason = statusCode < 500 && typeof response === 'object' &&
+                'authReason' in response && typeof response.authReason === 'string'
+                ? response.authReason
+                : undefined;
 
             let message = mappedException.message;
             let details: string[] | undefined;
@@ -83,6 +87,7 @@ export class GraphqlExceptionFilter
                 extensions: {
                     code: this.getErrorCode(statusCode),
                     statusCode,
+                    ...(authReason ? { authReason } : {}),
                     ...(details ? { details } : {}),
                 },
             });

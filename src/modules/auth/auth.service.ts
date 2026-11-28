@@ -1,5 +1,6 @@
 import {
     Injectable,
+    Logger,
     UnauthorizedException,
     ForbiddenException,
 } from '@nestjs/common';
@@ -10,6 +11,8 @@ import { UsersService } from '../users/users.service.js';
 
 import { TokenService } from './services/token.service.js';
 import { SessionService } from './services/session.service.js';
+import { authError, type AuthReason } from './auth-errors.js';
+import { REFRESH_RETRY_WINDOW_MS } from './constants/auth.constants.js';
 
 import type { RegisterInput } from './dto/register.input.js';
 import type { LoginInput } from './dto/login.input.js';
@@ -26,6 +29,8 @@ import { UserStatus } from '../../generated/prisma/enums.js';
 
 @Injectable()
 export class AuthService {
+    private readonly logger = new Logger(AuthService.name);
+
     constructor(
         private readonly usersService: UsersService,
         private readonly tokenService: TokenService,
@@ -117,6 +122,66 @@ export class AuthService {
         return user;
     }
 
+    async refresh(refreshToken: string | undefined, requestId: string) {
+        if (!refreshToken) throw this.rejectRefresh('REFRESH_COOKIE_MISSING');
+        const payload = await this.tokenService.verifyRefreshToken(refreshToken);
+        const { sid: sessionId, sub: userId } = payload;
+        const currentTokenHash = this.tokenService.hashRefreshToken(refreshToken);
+        const requestHash = this.tokenService.hashRefreshToken(requestId);
+        const session = await this.readRefreshSession(sessionId, userId);
+        const issuedAt = new Date();
+        if (session.refreshTokenHash !== currentTokenHash || session.refreshRequestHash === requestHash) {
+            return this.resolveRotation(session, currentTokenHash, requestHash, requestId);
+        }
+
+        const expiresAt = this.tokenService.sessionExpiry(issuedAt, session.createdAt);
+        if (expiresAt.getTime() <= Date.now()) throw this.rejectRefresh('SESSION_EXPIRED');
+        const tokens = await this.tokenService.generateTokens(
+            userId, sessionId, issuedAt, expiresAt, { requestId, currentTokenHash },
+        );
+        const rotated = await this.sessionService.rotateSession({
+            sessionId, userId, currentTokenHash, requestHash, expiresAt, rotatedAt: issuedAt,
+            newTokenHash: this.tokenService.hashRefreshToken(tokens.refreshToken),
+        });
+        if (rotated) return tokens;
+
+        const latest = await this.readRefreshSession(sessionId, userId);
+        return this.resolveRotation(latest, currentTokenHash, requestHash, requestId);
+    }
+
+    private async readRefreshSession(sessionId: string, userId: string) {
+        const session = await this.sessionService.findRefreshSession(sessionId, userId);
+        if (!session || session.revokedAt) throw this.rejectRefresh('SESSION_REVOKED');
+        if (session.expiresAt.getTime() <= Date.now()) throw this.rejectRefresh('SESSION_EXPIRED');
+        if (session.user.status !== UserStatus.ACTIVE) throw this.rejectRefresh('ACCOUNT_INACTIVE');
+        return session;
+    }
+
+    private async resolveRotation(
+        session: Awaited<ReturnType<AuthService['readRefreshSession']>>,
+        tokenHash: string, requestHash: string, requestId: string,
+    ) {
+        const { refreshRotatedAt, previousRefreshTokenHash } = session;
+        if (previousRefreshTokenHash && refreshRotatedAt &&
+            Date.now() - refreshRotatedAt.getTime() < REFRESH_RETRY_WINDOW_MS) {
+            if (session.refreshRequestHash === requestHash &&
+                (tokenHash === previousRefreshTokenHash || tokenHash === session.refreshTokenHash)) {
+                const tokens = await this.tokenService.generateTokens(
+                    session.userId, session.id, refreshRotatedAt, session.expiresAt,
+                    { requestId, currentTokenHash: previousRefreshTokenHash },
+                );
+                if (this.tokenService.hashRefreshToken(tokens.refreshToken) === session.refreshTokenHash) return tokens;
+            }
+            if (tokenHash === previousRefreshTokenHash) throw this.rejectRefresh('REFRESH_ROTATION_CONFLICT');
+        }
+        throw this.rejectRefresh('REFRESH_TOKEN_INVALID');
+    }
+
+    private rejectRefresh(reason: AuthReason) {
+        this.logger.debug(`Session refresh rejected (${reason})`);
+        return authError(reason);
+    }
+
     // Logout from the current authentication session
     async logout({
         accessToken,
@@ -183,10 +248,13 @@ export class AuthService {
     ) {
         const sessionId = randomUUID();
 
-        // Generate JWT tokens
+        const createdAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+        const expiresAt = this.tokenService.sessionExpiry(createdAt, createdAt);
         const tokens = await this.tokenService.generateTokens(
             userId,
             sessionId,
+            createdAt,
+            expiresAt,
         );
 
         // Hash refresh token
@@ -195,32 +263,18 @@ export class AuthService {
                 tokens.refreshToken,
             );
 
-        // Determine session expiry from the signed token
-        const payload =
-            await this.tokenService.verifyRefreshToken(
-                tokens.refreshToken,
-            );
-
-        if (typeof payload.exp !== 'number') {
-            throw new UnauthorizedException(
-                'Invalid refresh token expiration',
-            );
-        }
-
-        const expiresAt = new Date(payload.exp * 1000);
-
         // Store session in PostgreSQL
         await this.sessionService.createSession({
             id: sessionId,
             userId,
             refreshTokenHash,
             expiresAt,
+            createdAt,
             ...metadata,
         });
 
         return {
             tokens,
-            sessionExpiresAt: expiresAt,
         };
     }
 }

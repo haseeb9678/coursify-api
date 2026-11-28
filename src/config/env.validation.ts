@@ -84,6 +84,10 @@ class EnvironmentVariables {
     @Min(1)
     JWT_REFRESH_EXPIRES_IN: number = 604800;
 
+    @IsInt()
+    @Min(1)
+    JWT_SESSION_MAX_AGE: number = 604800;
+
     // Sandbox checkout is opt-in. Empty secrets leave the rest of the LMS available.
     @IsIn(['true', 'false'])
     PAYMENTS_ENABLED: string = 'false';
@@ -124,6 +128,8 @@ export function validateEnv(
         {
             ...config,
 
+            JWT_SESSION_MAX_AGE: config.JWT_SESSION_MAX_AGE ?? config.JWT_REFRESH_EXPIRES_IN ?? 604800,
+
             COOKIE_SECURE:
                 config.COOKIE_SECURE ??
                 (
@@ -153,6 +159,10 @@ export function validateEnv(
 
     // Additional security validation
     if (errors.length === 0) {
+        if (validatedConfig.JWT_SESSION_MAX_AGE < validatedConfig.JWT_REFRESH_EXPIRES_IN) {
+            messages.push('JWT_SESSION_MAX_AGE must be at least JWT_REFRESH_EXPIRES_IN.');
+        }
+
         // Access and refresh secrets must be different
         if (
             validatedConfig.JWT_ACCESS_SECRET ===

@@ -1,4 +1,5 @@
-import { UseGuards } from '@nestjs/common';
+import { ForbiddenException, ParseUUIDPipe, UseGuards } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 
 import {
     Args,
@@ -34,6 +35,7 @@ export class AuthResolver {
     constructor(
         private readonly authService: AuthService,
         private readonly cookieService: CookieService,
+        private readonly config: ConfigService,
     ) { }
 
     // Register a new user
@@ -64,6 +66,7 @@ export class AuthResolver {
         @Context() context: GraphQLContext,
     ): Promise<AuthResponse> {
         const { req, res } = context;
+        this.checkOrigin(context);
 
         const result = await this.authService.login(input, {
             userAgent: req.get('user-agent') ?? 'Unknown',
@@ -77,13 +80,25 @@ export class AuthResolver {
         this.cookieService.setAuthCookies(
             res,
             result.tokens,
-            result.sessionExpiresAt,
         );
 
         return {
             ...createMutationResponse('Login successful'),
             user: result.user,
         };
+    }
+
+    @Mutation(() => MutationResponse)
+    async refreshSession(
+        @Args('requestId', { type: () => String }, new ParseUUIDPipe({ version: '4' })) requestId: string,
+        @Context() context: GraphQLContext,
+    ): Promise<MutationResponse> {
+        this.checkOrigin(context, true);
+        context.res.setHeader('Cache-Control', 'private, no-store');
+        const { refreshToken } = this.cookieService.getAuthCookies(context.req);
+        const tokens = await this.authService.refresh(refreshToken, requestId);
+        this.cookieService.setAuthCookies(context.res, tokens);
+        return createMutationResponse('Session refreshed');
     }
 
     // Get the currently authenticated user
@@ -107,6 +122,7 @@ export class AuthResolver {
         @Context() context: GraphQLContext,
     ): Promise<MutationResponse> {
         const { req, res } = context;
+        this.checkOrigin(context);
 
         // Extract authentication tokens from cookies
         const tokens =
@@ -121,5 +137,12 @@ export class AuthResolver {
         return createMutationResponse(
             'Logged out successfully',
         );
+    }
+
+    private checkOrigin({ req }: GraphQLContext, required = false): void {
+        const origin = req.get('origin');
+        if ((required || origin) && origin !== this.config.getOrThrow<string>('app.frontendUrl')) {
+            throw new ForbiddenException('Untrusted request origin');
+        }
     }
 }

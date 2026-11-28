@@ -35,67 +35,20 @@ export class CookieService {
         };
     }
 
-    // Set access token cookie
-    setAccessToken(
-        response: Response,
-        token: string,
-    ): void {
-        const expiresIn =
-            this.configService.getOrThrow<number>(
-                'jwt.accessExpiresIn',
-            );
-
-        response.cookie(
-            AUTH_COOKIES.ACCESS_TOKEN,
-            token,
-            {
-                ...this.getBaseCookieOptions(),
-                maxAge: expiresIn * 1000,
-            },
-        );
-    }
-
-    // Set refresh token cookie
-    setRefreshToken(
-        response: Response,
-        token: string,
-        expiresAt?: Date,
-    ): void {
-        const expiresIn =
-            this.configService.getOrThrow<number>(
-                'jwt.refreshExpiresIn',
-            );
-
-        const maxAge = expiresAt
-            ? Math.max(0, expiresAt.getTime() - Date.now())
-            : expiresIn * 1000;
-
-        response.cookie(
-            AUTH_COOKIES.REFRESH_TOKEN,
-            token,
-            {
-                ...this.getBaseCookieOptions(),
-                maxAge,
-            },
-        );
-    }
-
     // Set both authentication cookies
     setAuthCookies(
         response: Response,
         tokens: AuthTokens,
-        sessionExpiresAt?: Date,
     ): void {
-        this.setAccessToken(
-            response,
-            tokens.accessToken,
-        );
-
-        this.setRefreshToken(
-            response,
-            tokens.refreshToken,
-            sessionExpiresAt,
-        );
+        const options = this.getBaseCookieOptions();
+        response.setHeader('Cache-Control', 'private, no-store');
+        response.setHeader('X-Access-Expires-At', String(tokens.accessExpiresAt.getTime()));
+        response.cookie(AUTH_COOKIES.ACCESS_TOKEN, tokens.accessToken, {
+            ...options, maxAge: Math.max(0, tokens.accessExpiresAt.getTime() - Date.now()),
+        });
+        response.cookie(AUTH_COOKIES.REFRESH_TOKEN, tokens.refreshToken, {
+            ...options, maxAge: Math.max(0, tokens.refreshExpiresAt.getTime() - Date.now()),
+        });
     }
 
     // Extract authentication tokens from request cookies
@@ -131,6 +84,7 @@ export class CookieService {
 
     // Clear both authentication cookies
     clearAuthCookies(response: Response): void {
+        response.setHeader('Cache-Control', 'private, no-store');
         const options = this.getBaseCookieOptions();
 
         response.clearCookie(
